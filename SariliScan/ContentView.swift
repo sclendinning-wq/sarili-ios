@@ -23,7 +23,7 @@ struct ContentView: View {
     }
 
     /// Raw ARKit floats forwarded from the face anchor. No mm conversion, no averaging.
-    struct FaceReadout {
+    struct FaceReadout: Sendable {
         let leftEye: SIMD3<Float>
         let rightEye: SIMD3<Float>
         let eyeDistance: Float
