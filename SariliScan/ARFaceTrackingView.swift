@@ -49,8 +49,9 @@ struct ARFaceTrackingView: UIViewRepresentable {
 
     /// Receives `ARSession` callbacks and pushes the tracked-face state into SwiftUI.
     ///
-    /// `ARSession` delivers delegate callbacks on the main queue by default, which
-    /// matches this type's main-actor isolation, so the binding can be updated directly.
+    /// All updates to `faceDetected` are dispatched to the main thread, since
+    /// `ARSession` may deliver delegate callbacks off the main queue and SwiftUI
+    /// state must only be mutated on the main thread.
     final class Coordinator: NSObject, ARSessionDelegate {
         @Binding private var faceDetected: Bool
 
@@ -60,19 +61,25 @@ struct ARFaceTrackingView: UIViewRepresentable {
 
         func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
             if let face = anchors.compactMap({ $0 as? ARFaceAnchor }).first {
-                faceDetected = face.isTracked
+                DispatchQueue.main.async {
+                    self.faceDetected = face.isTracked
+                }
             }
         }
 
         func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
             if let face = anchors.compactMap({ $0 as? ARFaceAnchor }).first {
-                faceDetected = face.isTracked
+                DispatchQueue.main.async {
+                    self.faceDetected = face.isTracked
+                }
             }
         }
 
         func session(_ session: ARSession, didRemove anchors: [ARAnchor]) {
             if anchors.contains(where: { $0 is ARFaceAnchor }) {
-                faceDetected = false
+                DispatchQueue.main.async {
+                    self.faceDetected = false
+                }
             }
         }
     }
