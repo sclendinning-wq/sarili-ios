@@ -2,16 +2,17 @@
 //  ARFaceTrackingView.swift
 //  SariliScan
 //
-//  Bridges a RealityKit ARView running an ARFaceTrackingConfiguration into SwiftUI.
+//  Bridges an ARKit/SceneKit ARSCNView running an ARFaceTrackingConfiguration
+//  into SwiftUI, and renders a subtle wireframe mesh over the tracked face.
 //
 
 import SwiftUI
 import ARKit
-import RealityKit
+import SceneKit
 
-/// A SwiftUI wrapper around a RealityKit `ARView` that runs a face-tracking
-/// `ARSession`. Reports whether a face is currently being tracked back to
-/// SwiftUI via the `faceDetected` binding.
+/// A SwiftUI wrapper around an `ARSCNView` that runs a face-tracking `ARSession`
+/// and draws a semi-transparent wireframe over the detected face. Reports whether
+/// a face is currently being tracked back to SwiftUI via the `faceDetected` binding.
 struct ARFaceTrackingView: UIViewRepresentable {
 
     /// Driven from the AR session delegate; true while a face is tracked.
@@ -21,43 +22,82 @@ struct ARFaceTrackingView: UIViewRepresentable {
         Coordinator(faceDetected: $faceDetected)
     }
 
-    func makeUIView(context: Context) -> ARView {
-        let arView = ARView(frame: .zero)
+    func makeUIView(context: Context) -> ARSCNView {
+        let sceneView = ARSCNView(frame: .zero)
+        sceneView.automaticallyUpdatesLighting = true
 
-        // Face tracking requires a device with a TrueDepth front camera.
-        // On unsupported devices (and the simulator) we just return an empty view.
+        // Face tracking requires a device with a TrueDepth front camera. On
+        // unsupported devices the parent view shows an explicit message, but we
+        // still guard here so we never run an unsupported configuration.
         guard ARFaceTrackingConfiguration.isSupported else {
-            return arView
+            return sceneView
         }
+
+        sceneView.delegate = context.coordinator
+        sceneView.session.delegate = context.coordinator
 
         let configuration = ARFaceTrackingConfiguration()
         configuration.maximumNumberOfTrackedFaces = 1
+        sceneView.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
 
-        arView.session.delegate = context.coordinator
-        arView.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
-
-        return arView
+        return sceneView
     }
 
-    func updateUIView(_ uiView: ARView, context: Context) {
-        // Nothing to update; state flows out via the coordinator.
+    func updateUIView(_ uiView: ARSCNView, context: Context) {
+        // Nothing to update; mesh + state flow through the coordinator.
     }
 
-    static func dismantleUIView(_ uiView: ARView, coordinator: Coordinator) {
+    static func dismantleUIView(_ uiView: ARSCNView, coordinator: Coordinator) {
         uiView.session.pause()
     }
 
-    /// Receives `ARSession` callbacks and pushes the tracked-face state into SwiftUI.
+    /// Owns the face mesh geometry and pushes tracked-face state into SwiftUI.
     ///
-    /// All updates to `faceDetected` are dispatched to the main thread, since
-    /// `ARSession` may deliver delegate callbacks off the main queue and SwiftUI
-    /// state must only be mutated on the main thread.
-    final class Coordinator: NSObject, ARSessionDelegate {
+    /// Acts as both the SceneKit render delegate (to build/update the wireframe
+    /// mesh) and the AR session delegate (to report detection). All updates to
+    /// `faceDetected` are dispatched to the main thread, since SwiftUI state must
+    /// only be mutated on the main thread.
+    final class Coordinator: NSObject, ARSCNViewDelegate, ARSessionDelegate {
         @Binding private var faceDetected: Bool
 
         init(faceDetected: Binding<Bool>) {
             _faceDetected = faceDetected
         }
+
+        // MARK: - Mesh rendering (ARSCNViewDelegate)
+
+        /// Builds the wireframe mesh node when a face anchor appears. SceneKit
+        /// automatically removes this node when the anchor is removed, so the mesh
+        /// shows on detection and disappears when the face is lost.
+        func renderer(_ renderer: SCNSceneRenderer, nodeFor anchor: ARAnchor) -> SCNNode? {
+            guard anchor is ARFaceAnchor,
+                  let device = renderer.device,
+                  let faceGeometry = ARSCNFaceGeometry(device: device) else {
+                return nil
+            }
+
+            // Subtle, semi-transparent wireframe: thin lines, no shading.
+            let material = faceGeometry.firstMaterial
+            material?.fillMode = .lines
+            material?.lightingModel = .constant
+            material?.diffuse.contents = UIColor.white
+            material?.transparency = 0.35
+            material?.isDoubleSided = true
+            material?.readsFromDepthBuffer = false
+
+            return SCNNode(geometry: faceGeometry)
+        }
+
+        /// Conforms the mesh to the face on every frame.
+        func renderer(_ renderer: SCNSceneRenderer, didUpdate node: SCNNode, for anchor: ARAnchor) {
+            guard let faceAnchor = anchor as? ARFaceAnchor,
+                  let faceGeometry = node.geometry as? ARSCNFaceGeometry else {
+                return
+            }
+            faceGeometry.update(from: faceAnchor.geometry)
+        }
+
+        // MARK: - Detection state (ARSessionDelegate)
 
         func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
             if let face = anchors.compactMap({ $0 as? ARFaceAnchor }).first {

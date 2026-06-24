@@ -7,24 +7,30 @@
 
 import SwiftUI
 import AVFoundation
+import ARKit
 
 struct ContentView: View {
     @State private var faceDetected = false
-    @State private var cameraStatus: CameraStatus = .undetermined
+    @State private var scanState: ScanState = .requestingPermission
 
-    enum CameraStatus {
-        case undetermined, authorized, denied
+    enum ScanState {
+        case requestingPermission
+        case cameraDenied
+        case unsupported       // device has no TrueDepth camera / no face tracking
+        case ready             // camera authorized and face tracking supported
     }
 
     var body: some View {
         ZStack(alignment: .top) {
-            switch cameraStatus {
-            case .authorized:
+            switch scanState {
+            case .ready:
                 ARFaceTrackingView(faceDetected: $faceDetected)
                     .ignoresSafeArea()
-            case .denied:
+            case .cameraDenied:
                 deniedView
-            case .undetermined:
+            case .unsupported:
+                unsupportedView
+            case .requestingPermission:
                 Color.black
                     .ignoresSafeArea()
             }
@@ -32,7 +38,7 @@ struct ContentView: View {
             statusBadge
         }
         .task {
-            await requestCameraAccess()
+            await startSession()
         }
     }
 
@@ -51,12 +57,14 @@ struct ContentView: View {
     }
 
     private var statusText: String {
-        switch cameraStatus {
-        case .authorized:
+        switch scanState {
+        case .ready:
             return faceDetected ? "Face detected" : "No face detected"
-        case .denied:
+        case .cameraDenied:
             return "Camera access denied"
-        case .undetermined:
+        case .unsupported:
+            return "Face tracking not supported on this device"
+        case .requestingPermission:
             return "Requesting camera access…"
         }
     }
@@ -85,19 +93,45 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    // MARK: - Permission
+    // MARK: - Unsupported state
 
-    private func requestCameraAccess() async {
+    private var unsupportedView: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "faceid")
+                .font(.system(size: 44))
+                .foregroundStyle(.secondary)
+            Text("Face tracking isn’t supported on this device.")
+                .multilineTextAlignment(.center)
+            Text("Sarili needs an iPhone with a TrueDepth (Face ID) front camera to scan your face.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .padding(32)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: - Permission + capability
+
+    @MainActor
+    private func startSession() async {
+        // First confirm the device can actually do face tracking; surface this
+        // explicitly rather than letting it look like "no face detected".
+        guard ARFaceTrackingConfiguration.isSupported else {
+            scanState = .unsupported
+            return
+        }
+
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
-            cameraStatus = .authorized
+            scanState = .ready
         case .notDetermined:
             let granted = await AVCaptureDevice.requestAccess(for: .video)
-            cameraStatus = granted ? .authorized : .denied
+            scanState = granted ? .ready : .cameraDenied
         case .denied, .restricted:
-            cameraStatus = .denied
+            scanState = .cameraDenied
         @unknown default:
-            cameraStatus = .denied
+            scanState = .cameraDenied
         }
     }
 }
