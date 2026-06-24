@@ -8,10 +8,12 @@
 import SwiftUI
 import AVFoundation
 import ARKit
+import simd
 
 struct ContentView: View {
     @State private var faceDetected = false
     @State private var scanState: ScanState = .requestingPermission
+    @State private var readout: FaceReadout?
 
     enum ScanState {
         case requestingPermission
@@ -20,11 +22,20 @@ struct ContentView: View {
         case ready             // camera authorized and face tracking supported
     }
 
+    /// Raw ARKit floats forwarded from the face anchor. No mm conversion, no averaging.
+    struct FaceReadout {
+        let leftEye: SIMD3<Float>
+        let rightEye: SIMD3<Float>
+        let eyeDistance: Float
+        let faceOrigin: SIMD3<Float>
+    }
+
     var body: some View {
         ZStack(alignment: .top) {
             switch scanState {
             case .ready:
-                ARFaceTrackingView(faceDetected: $faceDetected)
+                ARFaceTrackingView(faceDetected: $faceDetected,
+                                   onFaceAnchorUpdate: handleFaceAnchor)
                     .ignoresSafeArea()
             case .cameraDenied:
                 deniedView
@@ -36,9 +47,19 @@ struct ContentView: View {
             }
 
             statusBadge
+
+            if scanState == .ready, let readout {
+                debugOverlay(readout)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                    .padding(16)
+            }
         }
         .task {
             await startSession()
+        }
+        .onChange(of: faceDetected) { _, isDetected in
+            // Clear the live readout the moment the face is lost.
+            if !isDetected { readout = nil }
         }
     }
 
@@ -66,6 +87,49 @@ struct ContentView: View {
             return "Face tracking not supported on this device"
         case .requestingPermission:
             return "Requesting camera access…"
+        }
+    }
+
+    // MARK: - Debug readout overlay
+
+    private func debugOverlay(_ r: FaceReadout) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("L eye   \(vec(r.leftEye))")
+            Text("R eye   \(vec(r.rightEye))")
+            Text("eye Δ   \(String(format: "%+.5f", r.eyeDistance))")
+            Text("origin  \(vec(r.faceOrigin))")
+        }
+        .font(.system(.caption2, design: .monospaced))
+        .foregroundStyle(.green)
+        .padding(10)
+        .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func vec(_ v: SIMD3<Float>) -> String {
+        String(format: "%+.5f %+.5f %+.5f", v.x, v.y, v.z)
+    }
+
+    // MARK: - Face anchor callback (decoupled from mesh rendering)
+
+    private func handleFaceAnchor(_ faceAnchor: ARFaceAnchor) {
+        // Reading happens on the SceneKit render thread; capture raw floats into a
+        // Sendable value and hand off to the main thread for display.
+        let l = faceAnchor.leftEyeTransform.columns.3
+        let r = faceAnchor.rightEyeTransform.columns.3
+        let o = faceAnchor.transform.columns.3
+
+        let left = SIMD3<Float>(l.x, l.y, l.z)
+        let right = SIMD3<Float>(r.x, r.y, r.z)
+        let origin = SIMD3<Float>(o.x, o.y, o.z)
+        let value = FaceReadout(
+            leftEye: left,
+            rightEye: right,
+            eyeDistance: simd_distance(left, right),
+            faceOrigin: origin
+        )
+
+        DispatchQueue.main.async {
+            self.readout = value
         }
     }
 

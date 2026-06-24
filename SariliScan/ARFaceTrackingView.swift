@@ -18,8 +18,12 @@ struct ARFaceTrackingView: UIViewRepresentable {
     /// Driven from the AR session delegate; true while a face is tracked.
     @Binding var faceDetected: Bool
 
+    /// Fired from the SceneKit delegate's `didUpdate` with the live face anchor.
+    /// Consumers read raw landmark data here, decoupled from mesh rendering.
+    var onFaceAnchorUpdate: ((ARFaceAnchor) -> Void)? = nil
+
     func makeCoordinator() -> Coordinator {
-        Coordinator(faceDetected: $faceDetected)
+        Coordinator(faceDetected: $faceDetected, onFaceAnchorUpdate: onFaceAnchorUpdate)
     }
 
     func makeUIView(context: Context) -> ARSCNView {
@@ -59,9 +63,11 @@ struct ARFaceTrackingView: UIViewRepresentable {
     /// only be mutated on the main thread.
     final class Coordinator: NSObject, ARSCNViewDelegate, ARSessionDelegate {
         @Binding private var faceDetected: Bool
+        private let onFaceAnchorUpdate: ((ARFaceAnchor) -> Void)?
 
-        init(faceDetected: Binding<Bool>) {
+        init(faceDetected: Binding<Bool>, onFaceAnchorUpdate: ((ARFaceAnchor) -> Void)?) {
             _faceDetected = faceDetected
+            self.onFaceAnchorUpdate = onFaceAnchorUpdate
         }
 
         // MARK: - Mesh rendering (ARSCNViewDelegate)
@@ -88,13 +94,17 @@ struct ARFaceTrackingView: UIViewRepresentable {
             return SCNNode(geometry: faceGeometry)
         }
 
-        /// Conforms the mesh to the face on every frame.
+        /// Conforms the mesh to the face on every frame, then forwards the raw
+        /// anchor to consumers. The readout/measurement logic lives in the
+        /// callback, kept out of this mesh-rendering path.
         func renderer(_ renderer: SCNSceneRenderer, didUpdate node: SCNNode, for anchor: ARAnchor) {
-            guard let faceAnchor = anchor as? ARFaceAnchor,
-                  let faceGeometry = node.geometry as? ARSCNFaceGeometry else {
-                return
+            guard let faceAnchor = anchor as? ARFaceAnchor else { return }
+
+            if let faceGeometry = node.geometry as? ARSCNFaceGeometry {
+                faceGeometry.update(from: faceAnchor.geometry)
             }
-            faceGeometry.update(from: faceAnchor.geometry)
+
+            onFaceAnchorUpdate?(faceAnchor)
         }
 
         // MARK: - Detection state (ARSessionDelegate)
