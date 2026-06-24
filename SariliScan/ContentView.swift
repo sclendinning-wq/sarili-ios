@@ -8,14 +8,21 @@
 import SwiftUI
 
 struct ContentView: View {
+    @State private var faceDetected = false
+
     var body: some View {
-        VStack {
-            Image(systemName: "globe")
-                .imageScale(.large)
-                .foregroundStyle(.tint)
-            Text("Hello, world!")
+        ZStack(alignment: .top) {
+            ARFaceTrackingView(faceDetected: $faceDetected)
+                .ignoresSafeArea()
+
+            Text(faceDetected ? "Face detected" : "No face detected")
+                .font(.headline)
+                .foregroundStyle(.white)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(.ultraThinMaterial, in: Capsule())
+                .padding(.top, 24)
         }
-        .padding()
     }
 }
 
