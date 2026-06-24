@@ -113,6 +113,7 @@ struct ContentView: View {
 
     // MARK: - Permission + capability
 
+    @MainActor
     private func startSession() async {
         // First confirm the device can actually do face tracking; surface this
         // explicitly rather than letting it look like "no face detected".
