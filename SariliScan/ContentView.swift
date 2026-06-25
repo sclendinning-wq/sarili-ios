@@ -17,12 +17,20 @@ struct ContentView: View {
     @State private var showVertexDots = false
     @State private var tappedVertex: Int?
 
+    // DEBUG-ONLY: eyelid index collection state.
+    @State private var collectingEye: Eye = .left
+    @State private var leftCollected: [Int] = []
+    @State private var rightCollected: [Int] = []
+    @State private var collectionHistory: [Eye] = []   // order of adds, for Undo
+
     enum ScanState {
         case requestingPermission
         case cameraDenied
         case unsupported       // device has no TrueDepth camera / no face tracking
         case ready             // camera authorized and face tracking supported
     }
+
+    enum Eye { case left, right }
 
     /// Raw ARKit floats forwarded from the face anchor. No averaging, single frame.
     struct FaceReadout: Sendable {
@@ -41,7 +49,7 @@ struct ContentView: View {
                 ARFaceTrackingView(faceDetected: $faceDetected,
                                    showVertexDots: showVertexDots,
                                    onSampleReady: handleSample,
-                                   onVertexPicked: { tappedVertex = $0 })
+                                   onVertexPicked: handleVertexTap)
                     .ignoresSafeArea()
             case .cameraDenied:
                 deniedView
@@ -65,9 +73,11 @@ struct ContentView: View {
                 tapIdentifyBadge
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                     .padding(.top, 76)
-            }
 
-            if scanState == .ready, let readout {
+                collectionPanel
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                    .padding(12)
+            } else if scanState == .ready, let readout {
                 debugOverlay(readout)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
                     .padding(16)
@@ -134,6 +144,94 @@ struct ContentView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             .background(.black.opacity(0.55), in: Capsule())
+    }
+
+    // MARK: - Eyelid index collection (debug)
+
+    /// DEBUG-ONLY: collect tapped vertex indices into per-eye lists, with
+    /// undo/clear/copy, so eyelid rim indices can be gathered on device.
+    private var collectionPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Picker("Collecting", selection: $collectingEye) {
+                Text("Left Eye").tag(Eye.left)
+                Text("Right Eye").tag(Eye.right)
+            }
+            .pickerStyle(.segmented)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Left eyelid indices:  \(format(leftCollected))")
+                Text("Right eyelid indices: \(format(rightCollected))")
+            }
+            .font(.system(.caption2, design: .monospaced))
+            .foregroundStyle(.white)
+            .lineLimit(3)
+            .minimumScaleFactor(0.7)
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            HStack(spacing: 8) {
+                Button("Undo last", action: undoLast)
+                Button("Clear left", action: clearLeft)
+                Button("Clear right", action: clearRight)
+                Button("Copy indices", action: copyIndices)
+            }
+            .font(.caption2)
+            .controlSize(.small)
+            .buttonStyle(.bordered)
+            .tint(.white)
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+        }
+        .padding(12)
+        .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func format(_ list: [Int]) -> String {
+        "[" + list.map(String.init).joined(separator: ", ") + "]"
+    }
+
+    /// Called on the main thread when a vertex is tapped. Marks it (yellow) and,
+    /// while collecting, appends it to the selected eye list (no duplicates).
+    private func handleVertexTap(_ index: Int) {
+        tappedVertex = index
+        guard showVertexDots else { return }
+        switch collectingEye {
+        case .left:
+            guard !leftCollected.contains(index) else { return }
+            leftCollected.append(index)
+        case .right:
+            guard !rightCollected.contains(index) else { return }
+            rightCollected.append(index)
+        }
+        collectionHistory.append(collectingEye)
+    }
+
+    private func undoLast() {
+        guard let last = collectionHistory.popLast() else { return }
+        switch last {
+        case .left:  if !leftCollected.isEmpty { leftCollected.removeLast() }
+        case .right: if !rightCollected.isEmpty { rightCollected.removeLast() }
+        }
+    }
+
+    private func clearLeft() {
+        leftCollected.removeAll()
+        collectionHistory.removeAll { $0 == .left }
+    }
+
+    private func clearRight() {
+        rightCollected.removeAll()
+        collectionHistory.removeAll { $0 == .right }
+    }
+
+    private func copyIndices() {
+        let text = """
+        Left eyelid rim indices:
+        \(format(leftCollected))
+
+        Right eyelid rim indices:
+        \(format(rightCollected))
+        """
+        UIPasteboard.general.string = text
     }
 
     // MARK: - Debug readout overlay
