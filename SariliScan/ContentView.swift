@@ -30,7 +30,7 @@ struct ContentView: View {
         let eyeDistance: Float          // metres, eye-transform separation
         let faceOrigin: SIMD3<Float>
         let eyeTransformPDmm: Float      // eye-transform PD, millimetres
-        let irisPDmm: Float?             // iris-landmark PD (world space); nil until indices set
+        let eyelidPDmm: Float?           // eyelid-centroid PD (world space); nil until rim indices set
     }
 
     var body: some View {
@@ -130,9 +130,9 @@ struct ContentView: View {
             Divider().overlay(.green.opacity(0.4))
 
             // Side-by-side PD comparison.
-            Text("Eye transform PD:   \(mm(r.eyeTransformPDmm))")
-            Text("Iris landmark PD:   \(r.irisPDmm.map(mm) ?? "n/a — set iris indices")")
-            Text("Coordinate space:   world")
+            Text("Eye transform PD:     \(mm(r.eyeTransformPDmm))")
+            Text("Eyelid centroid PD:   \(r.eyelidPDmm.map(mm) ?? "n/a — set eyelid rim indices")")
+            Text("Coordinate space:     world")
         }
         .font(.system(.caption2, design: .monospaced))
         .foregroundStyle(.green)
@@ -157,14 +157,16 @@ struct ContentView: View {
         // --- Eye-transform PD (existing approach, kept for comparison) ---
         let eyeDistance = simd_distance(sample.leftEye, sample.rightEye)
 
-        // --- Iris-landmark PD (world space) ---
+        // --- Eyelid-centroid PD (world space) ---
         // ARFaceGeometry.vertices are in face-local space; transform to world
-        // before measuring. Distance is computed between the two iris centres.
-        var irisPDmm: Float?
-        if let leftIris = worldIrisCentre(IrisLandmarks.leftIrisRing, sample.vertices, sample.faceTransform),
-           let rightIris = worldIrisCentre(IrisLandmarks.rightIrisRing, sample.vertices, sample.faceTransform) {
-            let pdMetres = simd_distance(leftIris, rightIris)
-            irisPDmm = pdMetres * 1000
+        // before measuring. Each eye centre is the centroid of its eyelid rim
+        // loop; PD is the distance between the two centres, plus an empirical
+        // calibration offset (0 until validated against clinical PD).
+        var eyelidPDmm: Float?
+        if let leftCentre = worldEyeCentre(EyeLandmarks.leftEyeRim, sample.vertices, sample.faceTransform),
+           let rightCentre = worldEyeCentre(EyeLandmarks.rightEyeRim, sample.vertices, sample.faceTransform) {
+            let pdMetres = simd_distance(leftCentre, rightCentre)
+            eyelidPDmm = pdMetres * 1000 + EyeLandmarks.pdCalibrationOffsetMM
         }
 
         readout = FaceReadout(
@@ -173,15 +175,15 @@ struct ContentView: View {
             eyeDistance: eyeDistance,
             faceOrigin: sample.faceOrigin,
             eyeTransformPDmm: eyeDistance * 1000,
-            irisPDmm: irisPDmm
+            eyelidPDmm: eyelidPDmm
         )
     }
 
-    /// Average of the given iris-ring vertices, transformed from face-local to
+    /// Average of the given eyelid-rim vertices, transformed from face-local to
     /// world space. Returns nil if no valid indices are configured yet.
-    private func worldIrisCentre(_ indices: [Int],
-                                 _ vertices: [SIMD3<Float>],
-                                 _ faceTransform: simd_float4x4) -> SIMD3<Float>? {
+    private func worldEyeCentre(_ indices: [Int],
+                                _ vertices: [SIMD3<Float>],
+                                _ faceTransform: simd_float4x4) -> SIMD3<Float>? {
         var sum = SIMD3<Float>(repeating: 0)
         var count: Float = 0
         for index in indices where index >= 0 && index < vertices.count {

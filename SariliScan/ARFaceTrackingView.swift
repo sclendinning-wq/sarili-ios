@@ -4,7 +4,7 @@
 //
 //  Bridges an ARKit/SceneKit ARSCNView running an ARFaceTrackingConfiguration
 //  into SwiftUI, renders a subtle wireframe mesh over the tracked face, and
-//  (in debug mode) renders the mesh vertices as dots to identify iris indices.
+//  (in debug mode) renders the mesh vertices as dots to identify eyelid indices.
 //
 
 import SwiftUI
@@ -19,8 +19,8 @@ struct ARFaceTrackingView: UIViewRepresentable {
     /// Driven from the AR session delegate; true while a face is tracked.
     @Binding var faceDetected: Bool
 
-    /// DEBUG-ONLY: render every face-mesh vertex as a dot, with the iris ring
-    /// clusters highlighted, to confirm iris vertex indices on device.
+    /// DEBUG-ONLY: render every face-mesh vertex as a dot, with the eyelid rim
+    /// loops highlighted, to confirm eyelid vertex indices on device.
     /// This is shared mutable state read on the render thread and written on the
     /// main thread — fine for a debug toggle, but remove before production
     /// measurement code rather than relying on it for anything load-bearing.
@@ -80,7 +80,7 @@ struct ARFaceTrackingView: UIViewRepresentable {
         private let onSampleReady: ((FaceAnchorSample) -> Void)?
 
         private weak var allDotsNode: SCNNode?
-        private weak var irisDotsNode: SCNNode?
+        private weak var eyelidDotsNode: SCNNode?
 
         init(faceDetected: Binding<Bool>,
              showVertexDots: Bool,
@@ -119,9 +119,9 @@ struct ARFaceTrackingView: UIViewRepresentable {
             node.addChildNode(allDots)
             allDotsNode = allDots
 
-            let irisDots = SCNNode()
-            node.addChildNode(irisDots)
-            irisDotsNode = irisDots
+            let eyelidDots = SCNNode()
+            node.addChildNode(eyelidDots)
+            eyelidDotsNode = eyelidDots
 
             return node
         }
@@ -162,26 +162,27 @@ struct ARFaceTrackingView: UIViewRepresentable {
         private func updateVertexDots(_ faceAnchor: ARFaceAnchor) {
             guard showVertexDots else {
                 allDotsNode?.isHidden = true
-                irisDotsNode?.isHidden = true
+                eyelidDotsNode?.isHidden = true
                 return
             }
 
             let vertices = faceAnchor.geometry.vertices
 
-            // All vertices: small translucent white dots.
+            // All vertices: small translucent white dots for context.
             let allPoints = vertices.map { SCNVector3($0.x, $0.y, $0.z) }
             allDotsNode?.geometry = Coordinator.pointCloud(
-                allPoints, color: UIColor.white.withAlphaComponent(0.5), size: 5)
+                allPoints, color: UIColor.white.withAlphaComponent(0.45), size: 4)
             allDotsNode?.isHidden = false
 
-            // Iris ring vertices: larger red dots (empty until indices confirmed).
-            let irisPoints = IrisLandmarks.allIrisRing
+            // Eyelid rim vertices: large, distinct cyan dots so the loops stand
+            // out clearly against the white cloud (empty until indices confirmed).
+            let eyelidPoints = EyeLandmarks.allEyeRim
                 .filter { $0 >= 0 && $0 < vertices.count }
                 .map { SCNVector3(vertices[$0].x, vertices[$0].y, vertices[$0].z) }
-            irisDotsNode?.geometry = irisPoints.isEmpty
+            eyelidDotsNode?.geometry = eyelidPoints.isEmpty
                 ? nil
-                : Coordinator.pointCloud(irisPoints, color: .systemRed, size: 14)
-            irisDotsNode?.isHidden = false
+                : Coordinator.pointCloud(eyelidPoints, color: .systemTeal, size: 22)
+            eyelidDotsNode?.isHidden = false
         }
 
         /// Builds an SCNGeometry that renders the given points as dots.
