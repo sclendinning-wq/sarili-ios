@@ -31,10 +31,15 @@ struct ARFaceTrackingView: UIViewRepresentable {
     /// never touching the (non-Sendable) ARFaceAnchor.
     var onSampleReady: ((FaceAnchorSample) -> Void)? = nil
 
+    /// DEBUG-ONLY: fired on the main thread with the mesh vertex index nearest a
+    /// tap, so eyelid rim indices can be identified directly on device.
+    var onVertexPicked: ((Int) -> Void)? = nil
+
     func makeCoordinator() -> Coordinator {
         Coordinator(faceDetected: $faceDetected,
                     showVertexDots: showVertexDots,
-                    onSampleReady: onSampleReady)
+                    onSampleReady: onSampleReady,
+                    onVertexPicked: onVertexPicked)
     }
 
     func makeUIView(context: Context) -> ARSCNView {
@@ -50,6 +55,12 @@ struct ARFaceTrackingView: UIViewRepresentable {
 
         sceneView.delegate = context.coordinator
         sceneView.session.delegate = context.coordinator
+
+        // DEBUG-ONLY: tap-to-identify the nearest mesh vertex.
+        context.coordinator.sceneView = sceneView
+        let tap = UITapGestureRecognizer(target: context.coordinator,
+                                         action: #selector(Coordinator.handleTap(_:)))
+        sceneView.addGestureRecognizer(tap)
 
         let configuration = ARFaceTrackingConfiguration()
         configuration.maximumNumberOfTrackedFaces = 1
@@ -78,16 +89,27 @@ struct ARFaceTrackingView: UIViewRepresentable {
         // DEBUG-ONLY shared mutable flag (render thread reads, main thread writes).
         var showVertexDots: Bool
         private let onSampleReady: ((FaceAnchorSample) -> Void)?
+        private let onVertexPicked: ((Int) -> Void)?
 
         private weak var allDotsNode: SCNNode?
         private weak var eyelidDotsNode: SCNNode?
+        private weak var markerDotNode: SCNNode?
+
+        // DEBUG-ONLY tap-to-identify state. Only touched on the main thread
+        // (latest sample is stored from the main-thread dispatch; taps are main).
+        weak var sceneView: ARSCNView?
+        private var latestVertices: [SIMD3<Float>] = []
+        private var latestFaceTransform = matrix_identity_float4x4
+        private var pickedVertexIndex: Int?
 
         init(faceDetected: Binding<Bool>,
              showVertexDots: Bool,
-             onSampleReady: ((FaceAnchorSample) -> Void)?) {
+             onSampleReady: ((FaceAnchorSample) -> Void)?,
+             onVertexPicked: ((Int) -> Void)?) {
             _faceDetected = faceDetected
             self.showVertexDots = showVertexDots
             self.onSampleReady = onSampleReady
+            self.onVertexPicked = onVertexPicked
         }
 
         // MARK: - Mesh rendering (ARSCNViewDelegate)
@@ -123,6 +145,10 @@ struct ARFaceTrackingView: UIViewRepresentable {
             node.addChildNode(eyelidDots)
             eyelidDotsNode = eyelidDots
 
+            let markerDots = SCNNode()
+            node.addChildNode(markerDots)
+            markerDotNode = markerDots
+
             return node
         }
 
@@ -153,6 +179,9 @@ struct ARFaceTrackingView: UIViewRepresentable {
             )
 
             DispatchQueue.main.async {
+                // Cache latest geometry for the (main-thread) tap handler.
+                self.latestVertices = sample.vertices
+                self.latestFaceTransform = sample.faceTransform
                 self.onSampleReady?(sample)
             }
         }
@@ -163,6 +192,7 @@ struct ARFaceTrackingView: UIViewRepresentable {
             guard showVertexDots else {
                 allDotsNode?.isHidden = true
                 eyelidDotsNode?.isHidden = true
+                markerDotNode?.isHidden = true
                 return
             }
 
@@ -183,6 +213,46 @@ struct ARFaceTrackingView: UIViewRepresentable {
                 ? nil
                 : Coordinator.pointCloud(eyelidPoints, color: .systemTeal, size: 22)
             eyelidDotsNode?.isHidden = false
+
+            // Tapped vertex: a single large yellow marker for identification.
+            if let idx = pickedVertexIndex, idx >= 0, idx < vertices.count {
+                let p = vertices[idx]
+                markerDotNode?.geometry = Coordinator.pointCloud(
+                    [SCNVector3(p.x, p.y, p.z)], color: .systemYellow, size: 34)
+            } else {
+                markerDotNode?.geometry = nil
+            }
+            markerDotNode?.isHidden = false
+        }
+
+        // MARK: - Tap to identify (debug)
+
+        /// Projects every cached vertex to screen space and reports the index of
+        /// the one nearest the tap, so eyelid rim indices can be read on device.
+        @objc func handleTap(_ gesture: UITapGestureRecognizer) {
+            guard let sceneView, !latestVertices.isEmpty else { return }
+            let location = gesture.location(in: sceneView)
+
+            var bestIndex: Int?
+            var bestDistance = CGFloat.greatestFiniteMagnitude
+            for (index, vertex) in latestVertices.enumerated() {
+                let world = latestFaceTransform * SIMD4<Float>(vertex.x, vertex.y, vertex.z, 1.0)
+                let projected = sceneView.projectPoint(SCNVector3(world.x, world.y, world.z))
+                // Skip vertices behind the camera / outside the clip range.
+                guard projected.z >= 0, projected.z <= 1 else { continue }
+                let dx = CGFloat(projected.x) - location.x
+                let dy = CGFloat(projected.y) - location.y
+                let distance = dx * dx + dy * dy
+                if distance < bestDistance {
+                    bestDistance = distance
+                    bestIndex = index
+                }
+            }
+
+            if let bestIndex {
+                pickedVertexIndex = bestIndex
+                onVertexPicked?(bestIndex)
+            }
         }
 
         /// Builds an SCNGeometry that renders the given points as dots.

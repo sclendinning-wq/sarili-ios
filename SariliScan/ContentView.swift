@@ -15,6 +15,7 @@ struct ContentView: View {
     @State private var scanState: ScanState = .requestingPermission
     @State private var readout: FaceReadout?
     @State private var showVertexDots = false
+    @State private var tappedVertex: Int?
 
     enum ScanState {
         case requestingPermission
@@ -39,7 +40,8 @@ struct ContentView: View {
             case .ready:
                 ARFaceTrackingView(faceDetected: $faceDetected,
                                    showVertexDots: showVertexDots,
-                                   onSampleReady: handleSample)
+                                   onSampleReady: handleSample,
+                                   onVertexPicked: { tappedVertex = $0 })
                     .ignoresSafeArea()
             case .cameraDenied:
                 deniedView
@@ -57,6 +59,12 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
                     .padding(.top, 20)
                     .padding(.trailing, 16)
+            }
+
+            if scanState == .ready, showVertexDots {
+                tapIdentifyBadge
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .padding(.top, 76)
             }
 
             if scanState == .ready, let readout {
@@ -115,6 +123,17 @@ struct ContentView: View {
                 .background(.ultraThinMaterial, in: Capsule())
         }
         .tint(showVertexDots ? .green : .white)
+    }
+
+    /// DEBUG-ONLY: shows the index of the most recently tapped mesh vertex, so
+    /// eyelid rim indices can be read off and pasted into EyeLandmarks.swift.
+    private var tapIdentifyBadge: some View {
+        Text(tappedVertex.map { "Tapped vertex: \($0)" } ?? "Tap a dot to identify its index")
+            .font(.system(.caption, design: .monospaced))
+            .foregroundStyle(tappedVertex == nil ? .white : .yellow)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(.black.opacity(0.55), in: Capsule())
     }
 
     // MARK: - Debug readout overlay
