@@ -14,6 +14,7 @@ struct ContentView: View {
     @State private var faceDetected = false
     @State private var scanState: ScanState = .requestingPermission
     @State private var readout: FaceReadout?
+    @State private var showVertexDots = false
 
     enum ScanState {
         case requestingPermission
@@ -22,12 +23,14 @@ struct ContentView: View {
         case ready             // camera authorized and face tracking supported
     }
 
-    /// Raw ARKit floats forwarded from the face anchor. No mm conversion, no averaging.
+    /// Raw ARKit floats forwarded from the face anchor. No averaging, single frame.
     struct FaceReadout: Sendable {
         let leftEye: SIMD3<Float>
         let rightEye: SIMD3<Float>
-        let eyeDistance: Float
+        let eyeDistance: Float          // metres, eye-transform separation
         let faceOrigin: SIMD3<Float>
+        let eyeTransformPDmm: Float      // eye-transform PD, millimetres
+        let irisPDmm: Float?             // iris-landmark PD (world space); nil until indices set
     }
 
     var body: some View {
@@ -35,6 +38,7 @@ struct ContentView: View {
             switch scanState {
             case .ready:
                 ARFaceTrackingView(faceDetected: $faceDetected,
+                                   showVertexDots: showVertexDots,
                                    onFaceAnchorUpdate: handleFaceAnchor)
                     .ignoresSafeArea()
             case .cameraDenied:
@@ -47,6 +51,13 @@ struct ContentView: View {
             }
 
             statusBadge
+
+            if scanState == .ready {
+                vertexToggle
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                    .padding(.top, 20)
+                    .padding(.trailing, 16)
+            }
 
             if scanState == .ready, let readout {
                 debugOverlay(readout)
@@ -90,14 +101,38 @@ struct ContentView: View {
         }
     }
 
+    // MARK: - Vertex identifier toggle
+
+    private var vertexToggle: some View {
+        Button {
+            showVertexDots.toggle()
+        } label: {
+            Label(showVertexDots ? "Vertices: ON" : "Vertices: OFF",
+                  systemImage: "circle.grid.3x3.fill")
+                .font(.system(.caption, design: .monospaced))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(.ultraThinMaterial, in: Capsule())
+        }
+        .tint(showVertexDots ? .green : .white)
+    }
+
     // MARK: - Debug readout overlay
 
     private func debugOverlay(_ r: FaceReadout) -> some View {
         VStack(alignment: .leading, spacing: 4) {
+            // Raw eye-transform readout (kept from milestone 4).
             Text("L eye   \(vec(r.leftEye))")
             Text("R eye   \(vec(r.rightEye))")
             Text("eye Δ   \(String(format: "%+.5f", r.eyeDistance))")
             Text("origin  \(vec(r.faceOrigin))")
+
+            Divider().overlay(.green.opacity(0.4))
+
+            // Side-by-side PD comparison.
+            Text("Eye transform PD:   \(mm(r.eyeTransformPDmm))")
+            Text("Iris landmark PD:   \(r.irisPDmm.map(mm) ?? "n/a — set iris indices")")
+            Text("Coordinate space:   world")
         }
         .font(.system(.caption2, design: .monospaced))
         .foregroundStyle(.green)
@@ -109,11 +144,17 @@ struct ContentView: View {
         String(format: "%+.5f %+.5f %+.5f", v.x, v.y, v.z)
     }
 
+    private func mm(_ value: Float) -> String {
+        String(format: "%.1fmm", value)
+    }
+
     // MARK: - Face anchor callback (decoupled from mesh rendering)
 
     private func handleFaceAnchor(_ faceAnchor: ARFaceAnchor) {
         // Reading happens on the SceneKit render thread; capture raw floats into a
         // Sendable value and hand off to the main thread for display.
+
+        // --- Eye-transform PD (existing approach, kept for comparison) ---
         let l = faceAnchor.leftEyeTransform.columns.3
         let r = faceAnchor.rightEyeTransform.columns.3
         let o = faceAnchor.transform.columns.3
@@ -121,16 +162,50 @@ struct ContentView: View {
         let left = SIMD3<Float>(l.x, l.y, l.z)
         let right = SIMD3<Float>(r.x, r.y, r.z)
         let origin = SIMD3<Float>(o.x, o.y, o.z)
+        let eyeDistance = simd_distance(left, right)
+
+        // --- Iris-landmark PD (world space) ---
+        // ARFaceGeometry.vertices are in face-local space; transform to world
+        // before measuring. Distance is computed between the two iris centres.
+        var irisPDmm: Float?
+        let vertices = faceAnchor.geometry.vertices
+        let faceTransform = faceAnchor.transform
+        if let leftIris = worldIrisCentre(IrisLandmarks.leftIrisRing, vertices, faceTransform),
+           let rightIris = worldIrisCentre(IrisLandmarks.rightIrisRing, vertices, faceTransform) {
+            let pdMetres = simd_distance(leftIris, rightIris)
+            irisPDmm = pdMetres * 1000
+        }
+
         let value = FaceReadout(
             leftEye: left,
             rightEye: right,
-            eyeDistance: simd_distance(left, right),
-            faceOrigin: origin
+            eyeDistance: eyeDistance,
+            faceOrigin: origin,
+            eyeTransformPDmm: eyeDistance * 1000,
+            irisPDmm: irisPDmm
         )
 
         DispatchQueue.main.async {
             self.readout = value
         }
+    }
+
+    /// Average of the given iris-ring vertices, transformed from face-local to
+    /// world space. Returns nil if no valid indices are configured yet.
+    private func worldIrisCentre(_ indices: [Int],
+                                 _ vertices: [SIMD3<Float>],
+                                 _ faceTransform: simd_float4x4) -> SIMD3<Float>? {
+        var sum = SIMD3<Float>(repeating: 0)
+        var count: Float = 0
+        for index in indices where index >= 0 && index < vertices.count {
+            let localPosition = vertices[index]
+            let localVector = SIMD4<Float>(localPosition.x, localPosition.y, localPosition.z, 1.0)
+            let worldVector = faceTransform * localVector
+            sum += SIMD3<Float>(worldVector.x, worldVector.y, worldVector.z)
+            count += 1
+        }
+        guard count > 0 else { return nil }
+        return sum / count
     }
 
     // MARK: - Denied state

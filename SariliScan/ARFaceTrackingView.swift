@@ -3,7 +3,8 @@
 //  SariliScan
 //
 //  Bridges an ARKit/SceneKit ARSCNView running an ARFaceTrackingConfiguration
-//  into SwiftUI, and renders a subtle wireframe mesh over the tracked face.
+//  into SwiftUI, renders a subtle wireframe mesh over the tracked face, and
+//  (in debug mode) renders the mesh vertices as dots to identify iris indices.
 //
 
 import SwiftUI
@@ -18,12 +19,18 @@ struct ARFaceTrackingView: UIViewRepresentable {
     /// Driven from the AR session delegate; true while a face is tracked.
     @Binding var faceDetected: Bool
 
+    /// Debug mode: render every face-mesh vertex as a dot, with the iris ring
+    /// clusters highlighted, to confirm iris vertex indices on device.
+    var showVertexDots: Bool = false
+
     /// Fired from the SceneKit delegate's `didUpdate` with the live face anchor.
     /// Consumers read raw landmark data here, decoupled from mesh rendering.
     var onFaceAnchorUpdate: ((ARFaceAnchor) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(faceDetected: $faceDetected, onFaceAnchorUpdate: onFaceAnchorUpdate)
+        Coordinator(faceDetected: $faceDetected,
+                    showVertexDots: showVertexDots,
+                    onFaceAnchorUpdate: onFaceAnchorUpdate)
     }
 
     func makeUIView(context: Context) -> ARSCNView {
@@ -48,7 +55,8 @@ struct ARFaceTrackingView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: ARSCNView, context: Context) {
-        // Nothing to update; mesh + state flow through the coordinator.
+        // Propagate the debug toggle into the live coordinator.
+        context.coordinator.showVertexDots = showVertexDots
     }
 
     static func dismantleUIView(_ uiView: ARSCNView, coordinator: Coordinator) {
@@ -58,15 +66,22 @@ struct ARFaceTrackingView: UIViewRepresentable {
     /// Owns the face mesh geometry and pushes tracked-face state into SwiftUI.
     ///
     /// Acts as both the SceneKit render delegate (to build/update the wireframe
-    /// mesh) and the AR session delegate (to report detection). All updates to
-    /// `faceDetected` are dispatched to the main thread, since SwiftUI state must
-    /// only be mutated on the main thread.
+    /// mesh and debug dots) and the AR session delegate (to report detection).
+    /// All updates to `faceDetected` are dispatched to the main thread, since
+    /// SwiftUI state must only be mutated on the main thread.
     final class Coordinator: NSObject, ARSCNViewDelegate, ARSessionDelegate {
         @Binding private var faceDetected: Bool
+        var showVertexDots: Bool
         private let onFaceAnchorUpdate: ((ARFaceAnchor) -> Void)?
 
-        init(faceDetected: Binding<Bool>, onFaceAnchorUpdate: ((ARFaceAnchor) -> Void)?) {
+        private weak var allDotsNode: SCNNode?
+        private weak var irisDotsNode: SCNNode?
+
+        init(faceDetected: Binding<Bool>,
+             showVertexDots: Bool,
+             onFaceAnchorUpdate: ((ARFaceAnchor) -> Void)?) {
             _faceDetected = faceDetected
+            self.showVertexDots = showVertexDots
             self.onFaceAnchorUpdate = onFaceAnchorUpdate
         }
 
@@ -91,12 +106,24 @@ struct ARFaceTrackingView: UIViewRepresentable {
             material?.isDoubleSided = true
             material?.readsFromDepthBuffer = false
 
-            return SCNNode(geometry: faceGeometry)
+            let node = SCNNode(geometry: faceGeometry)
+
+            // Debug dot layers (vertices live in face-local space, so attaching
+            // them as children of the face node keeps them aligned with the mesh).
+            let allDots = SCNNode()
+            node.addChildNode(allDots)
+            allDotsNode = allDots
+
+            let irisDots = SCNNode()
+            node.addChildNode(irisDots)
+            irisDotsNode = irisDots
+
+            return node
         }
 
-        /// Conforms the mesh to the face on every frame, then forwards the raw
-        /// anchor to consumers. The readout/measurement logic lives in the
-        /// callback, kept out of this mesh-rendering path.
+        /// Conforms the mesh to the face on every frame, refreshes debug dots,
+        /// then forwards the raw anchor to consumers. The readout/measurement
+        /// logic lives in the callback, kept out of this mesh-rendering path.
         func renderer(_ renderer: SCNSceneRenderer, didUpdate node: SCNNode, for anchor: ARAnchor) {
             guard let faceAnchor = anchor as? ARFaceAnchor else { return }
 
@@ -104,7 +131,55 @@ struct ARFaceTrackingView: UIViewRepresentable {
                 faceGeometry.update(from: faceAnchor.geometry)
             }
 
+            updateVertexDots(faceAnchor)
+
             onFaceAnchorUpdate?(faceAnchor)
+        }
+
+        // MARK: - Vertex identifier (debug)
+
+        private func updateVertexDots(_ faceAnchor: ARFaceAnchor) {
+            guard showVertexDots else {
+                allDotsNode?.isHidden = true
+                irisDotsNode?.isHidden = true
+                return
+            }
+
+            let vertices = faceAnchor.geometry.vertices
+
+            // All vertices: small translucent white dots.
+            let allPoints = vertices.map { SCNVector3($0.x, $0.y, $0.z) }
+            allDotsNode?.geometry = Coordinator.pointCloud(
+                allPoints, color: UIColor.white.withAlphaComponent(0.5), size: 5)
+            allDotsNode?.isHidden = false
+
+            // Iris ring vertices: larger red dots (empty until indices confirmed).
+            let irisPoints = IrisLandmarks.allIrisRing
+                .filter { $0 >= 0 && $0 < vertices.count }
+                .map { SCNVector3(vertices[$0].x, vertices[$0].y, vertices[$0].z) }
+            irisDotsNode?.geometry = irisPoints.isEmpty
+                ? nil
+                : Coordinator.pointCloud(irisPoints, color: .systemRed, size: 14)
+            irisDotsNode?.isHidden = false
+        }
+
+        /// Builds an SCNGeometry that renders the given points as dots.
+        static func pointCloud(_ points: [SCNVector3], color: UIColor, size: CGFloat) -> SCNGeometry {
+            let source = SCNGeometrySource(vertices: points)
+            let indices = (0..<points.count).map { UInt32($0) }
+            let element = SCNGeometryElement(indices: indices, primitiveType: .point)
+            element.pointSize = size
+            element.minimumPointScreenSpaceRadius = size
+            element.maximumPointScreenSpaceRadius = size
+
+            let geometry = SCNGeometry(sources: [source], elements: [element])
+            let material = SCNMaterial()
+            material.diffuse.contents = color
+            material.lightingModel = .constant
+            material.isDoubleSided = true
+            material.readsFromDepthBuffer = false
+            geometry.firstMaterial = material
+            return geometry
         }
 
         // MARK: - Detection state (ARSessionDelegate)
