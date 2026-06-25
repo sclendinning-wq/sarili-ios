@@ -39,7 +39,7 @@ struct ContentView: View {
             case .ready:
                 ARFaceTrackingView(faceDetected: $faceDetected,
                                    showVertexDots: showVertexDots,
-                                   onFaceAnchorUpdate: handleFaceAnchor)
+                                   onSampleReady: handleSample)
                     .ignoresSafeArea()
             case .cameraDenied:
                 deniedView
@@ -148,46 +148,33 @@ struct ContentView: View {
         String(format: "%.1fmm", value)
     }
 
-    // MARK: - Face anchor callback (decoupled from mesh rendering)
+    // MARK: - Sample callback (runs on the main thread)
 
-    private func handleFaceAnchor(_ faceAnchor: ARFaceAnchor) {
-        // Reading happens on the SceneKit render thread; capture raw floats into a
-        // Sendable value and hand off to the main thread for display.
-
+    /// Receives a copied, Sendable per-frame sample on the main thread and does
+    /// all measurement here, decoupled from the mesh renderer and the render
+    /// thread. No raw ARFaceAnchor is involved.
+    private func handleSample(_ sample: FaceAnchorSample) {
         // --- Eye-transform PD (existing approach, kept for comparison) ---
-        let l = faceAnchor.leftEyeTransform.columns.3
-        let r = faceAnchor.rightEyeTransform.columns.3
-        let o = faceAnchor.transform.columns.3
-
-        let left = SIMD3<Float>(l.x, l.y, l.z)
-        let right = SIMD3<Float>(r.x, r.y, r.z)
-        let origin = SIMD3<Float>(o.x, o.y, o.z)
-        let eyeDistance = simd_distance(left, right)
+        let eyeDistance = simd_distance(sample.leftEye, sample.rightEye)
 
         // --- Iris-landmark PD (world space) ---
         // ARFaceGeometry.vertices are in face-local space; transform to world
         // before measuring. Distance is computed between the two iris centres.
         var irisPDmm: Float?
-        let vertices = faceAnchor.geometry.vertices
-        let faceTransform = faceAnchor.transform
-        if let leftIris = worldIrisCentre(IrisLandmarks.leftIrisRing, vertices, faceTransform),
-           let rightIris = worldIrisCentre(IrisLandmarks.rightIrisRing, vertices, faceTransform) {
+        if let leftIris = worldIrisCentre(IrisLandmarks.leftIrisRing, sample.vertices, sample.faceTransform),
+           let rightIris = worldIrisCentre(IrisLandmarks.rightIrisRing, sample.vertices, sample.faceTransform) {
             let pdMetres = simd_distance(leftIris, rightIris)
             irisPDmm = pdMetres * 1000
         }
 
-        let value = FaceReadout(
-            leftEye: left,
-            rightEye: right,
+        readout = FaceReadout(
+            leftEye: sample.leftEye,
+            rightEye: sample.rightEye,
             eyeDistance: eyeDistance,
-            faceOrigin: origin,
+            faceOrigin: sample.faceOrigin,
             eyeTransformPDmm: eyeDistance * 1000,
             irisPDmm: irisPDmm
         )
-
-        DispatchQueue.main.async {
-            self.readout = value
-        }
     }
 
     /// Average of the given iris-ring vertices, transformed from face-local to

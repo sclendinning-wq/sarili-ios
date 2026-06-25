@@ -19,18 +19,22 @@ struct ARFaceTrackingView: UIViewRepresentable {
     /// Driven from the AR session delegate; true while a face is tracked.
     @Binding var faceDetected: Bool
 
-    /// Debug mode: render every face-mesh vertex as a dot, with the iris ring
+    /// DEBUG-ONLY: render every face-mesh vertex as a dot, with the iris ring
     /// clusters highlighted, to confirm iris vertex indices on device.
+    /// This is shared mutable state read on the render thread and written on the
+    /// main thread — fine for a debug toggle, but remove before production
+    /// measurement code rather than relying on it for anything load-bearing.
     var showVertexDots: Bool = false
 
-    /// Fired from the SceneKit delegate's `didUpdate` with the live face anchor.
-    /// Consumers read raw landmark data here, decoupled from mesh rendering.
-    var onFaceAnchorUpdate: ((ARFaceAnchor) -> Void)? = nil
+    /// Fired on the MAIN thread with a copied, Sendable per-frame sample.
+    /// Consumers do all measurement here, decoupled from mesh rendering and
+    /// never touching the (non-Sendable) ARFaceAnchor.
+    var onSampleReady: ((FaceAnchorSample) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator {
         Coordinator(faceDetected: $faceDetected,
                     showVertexDots: showVertexDots,
-                    onFaceAnchorUpdate: onFaceAnchorUpdate)
+                    onSampleReady: onSampleReady)
     }
 
     func makeUIView(context: Context) -> ARSCNView {
@@ -71,18 +75,19 @@ struct ARFaceTrackingView: UIViewRepresentable {
     /// SwiftUI state must only be mutated on the main thread.
     final class Coordinator: NSObject, ARSCNViewDelegate, ARSessionDelegate {
         @Binding private var faceDetected: Bool
+        // DEBUG-ONLY shared mutable flag (render thread reads, main thread writes).
         var showVertexDots: Bool
-        private let onFaceAnchorUpdate: ((ARFaceAnchor) -> Void)?
+        private let onSampleReady: ((FaceAnchorSample) -> Void)?
 
         private weak var allDotsNode: SCNNode?
         private weak var irisDotsNode: SCNNode?
 
         init(faceDetected: Binding<Bool>,
              showVertexDots: Bool,
-             onFaceAnchorUpdate: ((ARFaceAnchor) -> Void)?) {
+             onSampleReady: ((FaceAnchorSample) -> Void)?) {
             _faceDetected = faceDetected
             self.showVertexDots = showVertexDots
-            self.onFaceAnchorUpdate = onFaceAnchorUpdate
+            self.onSampleReady = onSampleReady
         }
 
         // MARK: - Mesh rendering (ARSCNViewDelegate)
@@ -122,8 +127,9 @@ struct ARFaceTrackingView: UIViewRepresentable {
         }
 
         /// Conforms the mesh to the face on every frame, refreshes debug dots,
-        /// then forwards the raw anchor to consumers. The readout/measurement
-        /// logic lives in the callback, kept out of this mesh-rendering path.
+        /// then copies a Sendable sample and hands it to the main thread. The
+        /// readout/measurement logic lives in the consumer, kept out of this
+        /// mesh-rendering path and off the render thread.
         func renderer(_ renderer: SCNSceneRenderer, didUpdate node: SCNNode, for anchor: ARAnchor) {
             guard let faceAnchor = anchor as? ARFaceAnchor else { return }
 
@@ -133,7 +139,22 @@ struct ARFaceTrackingView: UIViewRepresentable {
 
             updateVertexDots(faceAnchor)
 
-            onFaceAnchorUpdate?(faceAnchor)
+            // Copy ARKit data into a Sendable value here on the render thread,
+            // then dispatch to main. The non-Sendable ARFaceAnchor never escapes.
+            let l = faceAnchor.leftEyeTransform.columns.3
+            let r = faceAnchor.rightEyeTransform.columns.3
+            let o = faceAnchor.transform.columns.3
+            let sample = FaceAnchorSample(
+                leftEye: SIMD3<Float>(l.x, l.y, l.z),
+                rightEye: SIMD3<Float>(r.x, r.y, r.z),
+                faceOrigin: SIMD3<Float>(o.x, o.y, o.z),
+                vertices: Array(faceAnchor.geometry.vertices),
+                faceTransform: faceAnchor.transform
+            )
+
+            DispatchQueue.main.async {
+                self.onSampleReady?(sample)
+            }
         }
 
         // MARK: - Vertex identifier (debug)
