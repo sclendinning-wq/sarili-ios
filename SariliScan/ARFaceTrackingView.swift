@@ -42,6 +42,9 @@ struct ARFaceTrackingView: UIViewRepresentable {
     /// Fired on the MAIN thread with the Vision PD diagnostics for one frame.
     var onVisionDebug: ((VisionDebugInfo) -> Void)? = nil
 
+    /// Which orientation to feed Vision. Switchable live on device.
+    var visionOrientation: VisionImageOrientation = .initial
+
     func makeCoordinator() -> Coordinator {
         Coordinator(faceDetected: $faceDetected,
                     showVertexDots: showVertexDots,
@@ -81,6 +84,7 @@ struct ARFaceTrackingView: UIViewRepresentable {
         // Propagate debug state into the live coordinator.
         context.coordinator.showVertexDots = showVertexDots
         context.coordinator.highlightedVertices = highlightedVertices
+        context.coordinator.visionOrientation = visionOrientation
     }
 
     static func dismantleUIView(_ uiView: ARSCNView, coordinator: Coordinator) {
@@ -108,6 +112,7 @@ struct ARFaceTrackingView: UIViewRepresentable {
         private let visionPipeline = VisionPDPipeline(detector: VisionPupilDetector())
         private var visionBusy = false
         private var visionHistory: [Float] = []   // recent PDs, for frame variance
+        var visionOrientation: VisionImageOrientation = .initial
 
         private weak var allDotsNode: SCNNode?
         private weak var eyelidDotsNode: SCNNode?
@@ -321,15 +326,20 @@ struct ARFaceTrackingView: UIViewRepresentable {
             let depth = (abs(leftEyeCam.z) + abs(rightEyeCam.z)) / 2
 
             let fx = frame.camera.intrinsics.columns.0.x
+            let fy = frame.camera.intrinsics.columns.1.y
 
             // Diagnostics available regardless of Vision success.
             let faceInCamera = cameraInverse * faceAnchor.transform
             let euler = Coordinator.eulerDegrees(faceInCamera)
             let tracking = Coordinator.describe(frame.camera.trackingState)
             let pixelBuffer = frame.capturedImage
+            let orientation = visionOrientation
 
             visionBusy = true
-            visionPipeline.process(pixelBuffer: pixelBuffer, fx: fx, depthMetres: depth) { [weak self] result in
+            visionPipeline.process(pixelBuffer: pixelBuffer,
+                                   fx: fx,
+                                   depthMetres: depth,
+                                   orientation: orientation.cg) { [weak self] result in
                 DispatchQueue.main.async {
                     guard let self else { return }
                     self.visionBusy = false
@@ -343,15 +353,40 @@ struct ARFaceTrackingView: UIViewRepresentable {
                         variance = Coordinator.stdDev(self.visionHistory)
                     }
 
+                    // Normalise pupil pixels to top-left origin for the overlay.
+                    func norm(_ p: CGPoint?, _ size: CGSize?) -> CGPoint? {
+                        guard let p, let size, size.width > 0, size.height > 0 else { return nil }
+                        return CGPoint(x: p.x / size.width, y: 1 - p.y / size.height)
+                    }
+
+                    let mode: String
+                    if result == nil { mode = "unavailable" }
+                    else if result?.usedFallback == true { mode = "fallback eye region" }
+                    else { mode = "pupil landmarks" }
+
+                    // Confidence heuristic: real pupil landmarks, plausible PD, and
+                    // a steady reading. Anything else means "go check the overlay".
+                    let pdOK = (result?.pdMM).map { $0 >= 45 && $0 <= 80 } ?? false
+                    let confidence = (mode == "pupil landmarks" && pdOK && variance < 3)
+                        ? "OK" : "needs checking"
+
                     onVisionDebug(VisionDebugInfo(
                         pdMM: result?.pdMM,
                         pixelDistance: result?.pixelDistance,
                         depthMetres: depth,
                         fx: fx,
-                        usedFallback: result?.usedFallback ?? false,
+                        fy: fy,
                         yaw: euler.yaw, pitch: euler.pitch, roll: euler.roll,
                         trackingState: tracking,
-                        frameVarianceMM: variance
+                        frameVarianceMM: variance,
+                        orientationName: orientation.rawValue,
+                        detectorMode: mode,
+                        coordinateConfidence: confidence,
+                        leftPupilPx: result?.left,
+                        rightPupilPx: result?.right,
+                        leftPupilNorm: norm(result?.left, result?.imageSize),
+                        rightPupilNorm: norm(result?.right, result?.imageSize),
+                        imageSize: result?.imageSize
                     ))
                 }
             }

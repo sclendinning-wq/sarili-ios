@@ -23,6 +23,7 @@ struct ContentView: View {
     @State private var detectedLeft: [Int] = []
     @State private var detectedRight: [Int] = []
     @State private var visionDebug: VisionDebugInfo?   // latest Vision diagnostics (async)
+    @State private var visionOrientation: VisionImageOrientation = .initial
 
     enum ScanState {
         case requestingPermission
@@ -46,8 +47,10 @@ struct ContentView: View {
                                    onSampleReady: handleSample,
                                    onVertexPicked: { tappedVertex = $0 },
                                    highlightedVertices: detectedLeft + detectedRight,
-                                   onVisionDebug: { visionDebug = $0 })
+                                   onVisionDebug: { visionDebug = $0 },
+                                   visionOrientation: visionOrientation)
                     .ignoresSafeArea()
+                    .overlay { pupilOverlay }
             case .cameraDenied:
                 deniedView
             case .unsupported:
@@ -64,6 +67,11 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
                     .padding(.top, 20)
                     .padding(.trailing, 16)
+
+                orientationSwitcher
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .padding(.top, 20)
+                    .padding(.leading, 16)
             }
 
             if scanState == .ready, showVertexDots {
@@ -205,6 +213,64 @@ struct ContentView: View {
         UIPasteboard.general.string = text
     }
 
+    // MARK: - Vision orientation switcher (debug)
+
+    /// Cycles the Vision image orientation live so it can be confirmed on device
+    /// without rebuilding.
+    private var orientationSwitcher: some View {
+        Button {
+            let all = VisionImageOrientation.allCases
+            if let i = all.firstIndex(of: visionOrientation) {
+                visionOrientation = all[(i + 1) % all.count]
+            }
+        } label: {
+            Label("Orient: \(visionOrientation.rawValue)", systemImage: "rotate.3d")
+                .font(.system(.caption, design: .monospaced))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(.ultraThinMaterial, in: Capsule())
+        }
+        .tint(.white)
+    }
+
+    // MARK: - Pupil overlay (debug)
+
+    /// Draws the detected Vision pupil centres and the line between them, using
+    /// the SAME image coordinates that feed the PD calc. If these dots don't land
+    /// on the real pupils, the PD number isn't trustworthy.
+    private var pupilOverlay: some View {
+        GeometryReader { geo in
+            if let v = visionDebug,
+               let ln = v.leftPupilNorm, let rn = v.rightPupilNorm,
+               let imageSize = v.imageSize {
+                let lp = aspectFillPoint(ln, imageSize, geo.size)
+                let rp = aspectFillPoint(rn, imageSize, geo.size)
+                let onPupils = (v.detectorMode == "pupil landmarks")
+                ZStack {
+                    Path { p in p.move(to: lp); p.addLine(to: rp) }
+                        .stroke(.cyan, lineWidth: 2)
+                    Circle().fill(onPupils ? .red : .orange)
+                        .frame(width: 14, height: 14).position(lp)
+                    Circle().fill(onPupils ? .red : .orange)
+                        .frame(width: 14, height: 14).position(rp)
+                }
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    /// Maps a top-left normalised image point into view coordinates assuming the
+    /// camera preview is aspect-fill (scaled to cover, centred, overflow cropped).
+    private func aspectFillPoint(_ norm: CGPoint, _ imageSize: CGSize, _ viewSize: CGSize) -> CGPoint {
+        guard imageSize.width > 0, imageSize.height > 0 else { return .zero }
+        let scale = max(viewSize.width / imageSize.width, viewSize.height / imageSize.height)
+        let dispW = imageSize.width * scale
+        let dispH = imageSize.height * scale
+        let offX = (viewSize.width - dispW) / 2
+        let offY = (viewSize.height - dispH) / 2
+        return CGPoint(x: offX + norm.x * dispW, y: offY + norm.y * dispH)
+    }
+
     // MARK: - Debug readout overlay
 
     private func debugOverlay(_ r: FaceReadout) -> some View {
@@ -214,14 +280,15 @@ struct ContentView: View {
             Text("Vision pupil-landmark PD: \(v?.pdMM.map(mm) ?? "n/a")")
             Text("Pixel pupil distance:     \(v?.pixelDistance.map { String(format: "%.0fpx", $0) } ?? "n/a")")
             Text("Depth used:               \(v.map { String(format: "%.2fm", $0.depthMetres) } ?? "n/a")")
-            Text("fx:                       \(v.map { String(format: "%.0f", $0.fx) } ?? "n/a")")
+            Text("fx / fy:                  \(v.map { String(format: "%.0f / %.0f", $0.fx, $0.fy) } ?? "n/a")")
             Text("Head yaw/pitch/roll:      \(v.map { String(format: "%.0f° / %.0f° / %.0f°", $0.yaw, $0.pitch, $0.roll) } ?? "n/a")")
             Text("Tracking state:           \(v?.trackingState ?? "n/a")")
             Text("Frame variance:           \(v.map { String(format: "%.1fmm", $0.frameVarianceMM) } ?? "n/a")")
-            if v?.usedFallback == true {
-                Text("(pupil fallback: eye region)")
-                    .foregroundStyle(.orange)
-            }
+            Text("Vision image orientation: \(v?.orientationName ?? visionOrientation.rawValue)")
+            Text("Pupil left point:         \(pt(v?.leftPupilPx))")
+            Text("Pupil right point:        \(pt(v?.rightPupilPx))")
+            Text("Vision detector mode:     \(v?.detectorMode ?? "n/a")")
+            Text("Coordinate confidence:    \(v?.coordinateConfidence ?? "n/a")")
         }
         .font(.system(.caption2, design: .monospaced))
         .foregroundStyle(.green)
@@ -231,6 +298,11 @@ struct ContentView: View {
 
     private func mm(_ value: Float) -> String {
         String(format: "%.1fmm", value)
+    }
+
+    private func pt(_ p: CGPoint?) -> String {
+        guard let p else { return "n/a" }
+        return String(format: "%.0f, %.0f", p.x, p.y)
     }
 
     // MARK: - Sample callback (runs on the main thread)

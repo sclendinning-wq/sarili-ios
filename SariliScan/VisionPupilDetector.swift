@@ -20,13 +20,35 @@ import Vision
 import CoreVideo
 import CoreGraphics
 
+// MARK: - Orientation (single source, easy to switch on device)
+
+/// The orientations we want to test for ARKit's `capturedImage`. Change in ONE
+/// place; the on-screen control cycles through these without rebuilding.
+enum VisionImageOrientation: String, CaseIterable, Sendable {
+    case leftMirrored, rightMirrored, up, down
+
+    var cg: CGImagePropertyOrientation {
+        switch self {
+        case .leftMirrored: return .leftMirrored
+        case .rightMirrored: return .rightMirrored
+        case .up: return .up
+        case .down: return .down
+        }
+    }
+
+    /// Default to start from; confirm/adjust on device.
+    static let initial: VisionImageOrientation = .leftMirrored
+}
+
 // MARK: - Stage 1: pupil detection (swappable)
 
-/// Pupil centres in image pixel coordinates, plus whether a fallback was used.
+/// Pupil centres in image pixel coordinates (oriented image space) plus the
+/// image size used, and whether the eye-region fallback stood in for pupils.
 struct PupilDetectionResult {
     let left: CGPoint
     let right: CGPoint
-    let usedFallback: Bool      // true when eye-region centroid stood in for pupils
+    let imageSize: CGSize
+    let usedFallback: Bool
 }
 
 /// Swap-in point: any pupil detector (Vision landmarks today, a custom iris
@@ -82,10 +104,10 @@ final class VisionPupilDetector: PupilDetector {
             }
 
             if let l = centre(landmarks.leftPupil), let r = centre(landmarks.rightPupil) {
-                completion(PupilDetectionResult(left: l, right: r, usedFallback: false))
+                completion(PupilDetectionResult(left: l, right: r, imageSize: imageSize, usedFallback: false))
             } else if let l = centre(landmarks.leftEye), let r = centre(landmarks.rightEye) {
                 print("[Sarili] Vision pupil landmarks unavailable — using eye-region fallback")
-                completion(PupilDetectionResult(left: l, right: r, usedFallback: true))
+                completion(PupilDetectionResult(left: l, right: r, imageSize: imageSize, usedFallback: true))
             } else {
                 completion(nil)
             }
@@ -99,6 +121,9 @@ final class VisionPupilDetector: PupilDetector {
 struct VisionPDResult {
     let pdMM: Float
     let pixelDistance: Float
+    let left: CGPoint
+    let right: CGPoint
+    let imageSize: CGSize
     let usedFallback: Bool
 }
 
@@ -108,11 +133,11 @@ struct VisionPDResult {
 ///     PD_mm = pixelDistance * depth / fx * 1000
 struct VisionPDPipeline {
     var detector: PupilDetector
-    var orientation: CGImagePropertyOrientation = .leftMirrored
 
     func process(pixelBuffer: CVPixelBuffer,
                  fx: Float,
                  depthMetres: Float,
+                 orientation: CGImagePropertyOrientation,
                  completion: @escaping (VisionPDResult?) -> Void) {
         detector.detectPupils(pixelBuffer: pixelBuffer, orientation: orientation) { pupils in
             guard let pupils, fx > 0 else { completion(nil); return }
@@ -121,6 +146,9 @@ struct VisionPDPipeline {
             let pdMM = pixelDistance * depthMetres / fx * 1000
             completion(VisionPDResult(pdMM: pdMM,
                                       pixelDistance: pixelDistance,
+                                      left: pupils.left,
+                                      right: pupils.right,
+                                      imageSize: pupils.imageSize,
                                       usedFallback: pupils.usedFallback))
         }
     }
@@ -128,16 +156,26 @@ struct VisionPDPipeline {
 
 // MARK: - Stage 4: display bundle
 
-/// Everything the on-screen test-harness readout needs for one frame.
+/// Everything the on-screen test-harness readout + pupil overlay need for one
+/// frame. Pupil points are provided both in image pixels (for logging) and as
+/// top-left-origin normalised points (for drawing over the preview).
 struct VisionDebugInfo: Sendable {
     let pdMM: Float?
     let pixelDistance: Float?
     let depthMetres: Float
     let fx: Float
-    let usedFallback: Bool
+    let fy: Float
     let yaw: Float
     let pitch: Float
     let roll: Float
     let trackingState: String
     let frameVarianceMM: Float
+    let orientationName: String
+    let detectorMode: String          // "pupil landmarks" / "fallback eye region" / "unavailable"
+    let coordinateConfidence: String  // "OK" / "needs checking"
+    let leftPupilPx: CGPoint?
+    let rightPupilPx: CGPoint?
+    let leftPupilNorm: CGPoint?        // top-left normalised, for the overlay
+    let rightPupilNorm: CGPoint?
+    let imageSize: CGSize?
 }
