@@ -22,7 +22,7 @@ struct ContentView: View {
     @State private var detecting = false
     @State private var detectedLeft: [Int] = []
     @State private var detectedRight: [Int] = []
-    @State private var visionPDmm: Float?   // latest Vision pupil PD (async)
+    @State private var visionDebug: VisionDebugInfo?   // latest Vision diagnostics (async)
 
     enum ScanState {
         case requestingPermission
@@ -31,16 +31,10 @@ struct ContentView: View {
         case ready             // camera authorized and face tracking supported
     }
 
-    /// Raw ARKit floats forwarded from the face anchor. No averaging, single frame.
+    /// ARKit-side PD values for one frame. Single frame, no averaging.
     struct FaceReadout: Sendable {
-        let leftEye: SIMD3<Float>
-        let rightEye: SIMD3<Float>
-        let eyeDistance: Float          // metres, eye-transform separation
-        let faceOrigin: SIMD3<Float>
         let eyeTransformPDmm: Float      // eye-transform PD, millimetres
-        let eyelidPDmm: Float?           // eyelid-centroid PD (world space); nil until rim indices set
-        let visionPDmm: Float?           // Vision pupil PD from the camera image; nil until detected
-        let combinedPDmm: Float?         // mean of all available methods; nil unless >= 2 present
+        let eyelidPDmm: Float?           // eyelid-centroid PD (world space); kept in code, not surfaced
     }
 
     var body: some View {
@@ -52,7 +46,7 @@ struct ContentView: View {
                                    onSampleReady: handleSample,
                                    onVertexPicked: { tappedVertex = $0 },
                                    highlightedVertices: detectedLeft + detectedRight,
-                                   onVisionPD: { visionPDmm = $0 })
+                                   onVisionDebug: { visionDebug = $0 })
                     .ignoresSafeArea()
             case .cameraDenied:
                 deniedView
@@ -214,31 +208,25 @@ struct ContentView: View {
     // MARK: - Debug readout overlay
 
     private func debugOverlay(_ r: FaceReadout) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            // Raw eye-transform readout (kept from milestone 4).
-            Text("L eye   \(vec(r.leftEye))")
-            Text("R eye   \(vec(r.rightEye))")
-            Text("eye Δ   \(String(format: "%+.5f", r.eyeDistance))")
-            Text("origin  \(vec(r.faceOrigin))")
-
-            Divider().overlay(.green.opacity(0.4))
-
-            // Each PD method shown individually (no combined average) so they can
-            // be validated against clinical separately. Combined value stays
-            // computed in code but is intentionally not surfaced.
-            Text("Eye transform PD:     \(mm(r.eyeTransformPDmm))")
-            Text("Eyelid centroid PD:   \(r.eyelidPDmm.map(mm) ?? "n/a — set eyelid rim indices")")
-            Text("Vision pupil PD:      \(r.visionPDmm.map(mm) ?? "n/a")")
-            Text("Coordinate space:     world")
+        let v = visionDebug
+        return VStack(alignment: .leading, spacing: 4) {
+            Text("ARKit eye-transform PD:   \(mm(r.eyeTransformPDmm))")
+            Text("Vision pupil-landmark PD: \(v?.pdMM.map(mm) ?? "n/a")")
+            Text("Pixel pupil distance:     \(v?.pixelDistance.map { String(format: "%.0fpx", $0) } ?? "n/a")")
+            Text("Depth used:               \(v.map { String(format: "%.2fm", $0.depthMetres) } ?? "n/a")")
+            Text("fx:                       \(v.map { String(format: "%.0f", $0.fx) } ?? "n/a")")
+            Text("Head yaw/pitch/roll:      \(v.map { String(format: "%.0f° / %.0f° / %.0f°", $0.yaw, $0.pitch, $0.roll) } ?? "n/a")")
+            Text("Tracking state:           \(v?.trackingState ?? "n/a")")
+            Text("Frame variance:           \(v.map { String(format: "%.1fmm", $0.frameVarianceMM) } ?? "n/a")")
+            if v?.usedFallback == true {
+                Text("(pupil fallback: eye region)")
+                    .foregroundStyle(.orange)
+            }
         }
         .font(.system(.caption2, design: .monospaced))
         .foregroundStyle(.green)
         .padding(10)
         .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 8))
-    }
-
-    private func vec(_ v: SIMD3<Float>) -> String {
-        String(format: "%+.5f %+.5f %+.5f", v.x, v.y, v.z)
     }
 
     private func mm(_ value: Float) -> String {
@@ -285,23 +273,8 @@ struct ContentView: View {
             eyelidPDmm = pdMetres * 1000 + EyeLandmarks.pdCalibrationOffsetMM
         }
 
-        // --- Combined average PD --- mean of all available methods (>= 2 present).
         let eyeTransformPDmm = eyeDistance * 1000
-        let available = [eyeTransformPDmm, eyelidPDmm, visionPDmm].compactMap { $0 }
-        let combinedPDmm = available.count >= 2
-            ? available.reduce(0, +) / Float(available.count)
-            : nil
-
-        readout = FaceReadout(
-            leftEye: sample.leftEye,
-            rightEye: sample.rightEye,
-            eyeDistance: eyeDistance,
-            faceOrigin: sample.faceOrigin,
-            eyeTransformPDmm: eyeTransformPDmm,
-            eyelidPDmm: eyelidPDmm,
-            visionPDmm: visionPDmm,
-            combinedPDmm: combinedPDmm
-        )
+        readout = FaceReadout(eyeTransformPDmm: eyeTransformPDmm, eyelidPDmm: eyelidPDmm)
     }
 
     /// Average of the given eyelid-rim vertices, transformed from face-local to

@@ -39,15 +39,15 @@ struct ARFaceTrackingView: UIViewRepresentable {
     /// Falls back to EyeLandmarks.allEyeRim when empty.
     var highlightedVertices: [Int] = []
 
-    /// Fired on the MAIN thread with the Vision pupil PD in mm (or nil).
-    var onVisionPD: ((Float?) -> Void)? = nil
+    /// Fired on the MAIN thread with the Vision PD diagnostics for one frame.
+    var onVisionDebug: ((VisionDebugInfo) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator {
         Coordinator(faceDetected: $faceDetected,
                     showVertexDots: showVertexDots,
                     onSampleReady: onSampleReady,
                     onVertexPicked: onVertexPicked,
-                    onVisionPD: onVisionPD)
+                    onVisionDebug: onVisionDebug)
     }
 
     func makeUIView(context: Context) -> ARSCNView {
@@ -100,12 +100,14 @@ struct ARFaceTrackingView: UIViewRepresentable {
         var highlightedVertices: [Int] = []
         private let onSampleReady: ((FaceAnchorSample) -> Void)?
         private let onVertexPicked: ((Int) -> Void)?
-        private let onVisionPD: ((Float?) -> Void)?
+        private let onVisionDebug: ((VisionDebugInfo) -> Void)?
 
-        // Vision pupil detection (debug). visionBusy is touched only on main
-        // (ARSession delegate callbacks arrive on the main queue here).
-        private let visionDetector = VisionPupilDetector()
+        // Vision PD pipeline (debug). The detector is swappable behind a protocol.
+        // visionBusy / visionHistory are touched only on main (ARSession delegate
+        // callbacks arrive on the main queue here).
+        private let visionPipeline = VisionPDPipeline(detector: VisionPupilDetector())
         private var visionBusy = false
+        private var visionHistory: [Float] = []   // recent PDs, for frame variance
 
         private weak var allDotsNode: SCNNode?
         private weak var eyelidDotsNode: SCNNode?
@@ -122,12 +124,12 @@ struct ARFaceTrackingView: UIViewRepresentable {
              showVertexDots: Bool,
              onSampleReady: ((FaceAnchorSample) -> Void)?,
              onVertexPicked: ((Int) -> Void)?,
-             onVisionPD: ((Float?) -> Void)?) {
+             onVisionDebug: ((VisionDebugInfo) -> Void)?) {
             _faceDetected = faceDetected
             self.showVertexDots = showVertexDots
             self.onSampleReady = onSampleReady
             self.onVertexPicked = onVertexPicked
-            self.onVisionPD = onVisionPD
+            self.onVisionDebug = onVisionDebug
         }
 
         // MARK: - Mesh rendering (ARSCNViewDelegate)
@@ -300,30 +302,92 @@ struct ARFaceTrackingView: UIViewRepresentable {
 
         // MARK: - Vision pupil PD (ARSessionDelegate frame)
 
-        /// Throttled (one in-flight at a time): runs Vision on the camera frame to
-        /// detect pupils and convert to a PD in mm using focal length + ARKit depth.
+        /// Throttled (one in-flight at a time). Runs the four-stage Vision PD
+        /// pipeline and assembles the diagnostic readout for one frame.
         func session(_ session: ARSession, didUpdate frame: ARFrame) {
-            guard let onVisionPD, !visionBusy,
+            guard let onVisionDebug, !visionBusy,
                   let faceAnchor = frame.anchors.compactMap({ $0 as? ARFaceAnchor }).first else {
                 return
             }
 
-            // Depth = distance from camera to the face, along the camera axis.
             let cameraInverse = simd_inverse(frame.camera.transform)
-            let faceInCamera = cameraInverse * faceAnchor.transform.columns.3
-            let depth = abs(faceInCamera.z)
-            let focalLengthPx = frame.camera.intrinsics.columns.0.x
+
+            // Stage 2 — depth source: the ARKit eye-transform plane (mean of the
+            // two eyes in camera space), the best available estimate of pupil depth.
+            let leftEyeWorld = faceAnchor.transform * faceAnchor.leftEyeTransform
+            let rightEyeWorld = faceAnchor.transform * faceAnchor.rightEyeTransform
+            let leftEyeCam = cameraInverse * leftEyeWorld.columns.3
+            let rightEyeCam = cameraInverse * rightEyeWorld.columns.3
+            let depth = (abs(leftEyeCam.z) + abs(rightEyeCam.z)) / 2
+
+            let fx = frame.camera.intrinsics.columns.0.x
+
+            // Diagnostics available regardless of Vision success.
+            let faceInCamera = cameraInverse * faceAnchor.transform
+            let euler = Coordinator.eulerDegrees(faceInCamera)
+            let tracking = Coordinator.describe(frame.camera.trackingState)
             let pixelBuffer = frame.capturedImage
 
             visionBusy = true
-            visionDetector.detectPD(pixelBuffer: pixelBuffer,
-                                    focalLengthPx: focalLengthPx,
-                                    depthMetres: depth) { [weak self] pd in
+            visionPipeline.process(pixelBuffer: pixelBuffer, fx: fx, depthMetres: depth) { [weak self] result in
                 DispatchQueue.main.async {
-                    self?.visionBusy = false
-                    onVisionPD(pd)
+                    guard let self else { return }
+                    self.visionBusy = false
+
+                    // Frame variance = std-dev of recent Vision PDs (not averaging
+                    // the output — a stability metric only).
+                    var variance: Float = 0
+                    if let pd = result?.pdMM {
+                        self.visionHistory.append(pd)
+                        if self.visionHistory.count > 10 { self.visionHistory.removeFirst() }
+                        variance = Coordinator.stdDev(self.visionHistory)
+                    }
+
+                    onVisionDebug(VisionDebugInfo(
+                        pdMM: result?.pdMM,
+                        pixelDistance: result?.pixelDistance,
+                        depthMetres: depth,
+                        fx: fx,
+                        usedFallback: result?.usedFallback ?? false,
+                        yaw: euler.yaw, pitch: euler.pitch, roll: euler.roll,
+                        trackingState: tracking,
+                        frameVarianceMM: variance
+                    ))
                 }
             }
+        }
+
+        /// Approximate yaw/pitch/roll (degrees) from a camera-relative transform.
+        /// Convention may need sign/axis tweaks on device; debug only.
+        static func eulerDegrees(_ t: simd_float4x4) -> (yaw: Float, pitch: Float, roll: Float) {
+            let r2x = t.columns.2.x, r2y = t.columns.2.y, r2z = t.columns.2.z
+            let pitch = atan2(-r2y, sqrt(r2x * r2x + r2z * r2z))
+            let yaw = atan2(r2x, r2z)
+            let roll = atan2(t.columns.0.y, t.columns.1.y)
+            let k = Float(180.0 / Float.pi)
+            return (yaw * k, pitch * k, roll * k)
+        }
+
+        static func describe(_ state: ARCamera.TrackingState) -> String {
+            switch state {
+            case .normal: return "normal"
+            case .notAvailable: return "not available"
+            case .limited(let reason):
+                switch reason {
+                case .initializing: return "limited: initializing"
+                case .excessiveMotion: return "limited: excessive motion"
+                case .insufficientFeatures: return "limited: low features"
+                case .relocalizing: return "limited: relocalizing"
+                @unknown default: return "limited"
+                }
+            }
+        }
+
+        static func stdDev(_ values: [Float]) -> Float {
+            guard values.count > 1 else { return 0 }
+            let mean = values.reduce(0, +) / Float(values.count)
+            let varSum = values.reduce(0) { $0 + ($1 - mean) * ($1 - mean) }
+            return sqrt(varSum / Float(values.count))
         }
 
         // MARK: - Detection state (ARSessionDelegate)
