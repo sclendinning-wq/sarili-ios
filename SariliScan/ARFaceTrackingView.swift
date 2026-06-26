@@ -39,11 +39,15 @@ struct ARFaceTrackingView: UIViewRepresentable {
     /// Falls back to EyeLandmarks.allEyeRim when empty.
     var highlightedVertices: [Int] = []
 
+    /// Fired on the MAIN thread with the Vision pupil PD in mm (or nil).
+    var onVisionPD: ((Float?) -> Void)? = nil
+
     func makeCoordinator() -> Coordinator {
         Coordinator(faceDetected: $faceDetected,
                     showVertexDots: showVertexDots,
                     onSampleReady: onSampleReady,
-                    onVertexPicked: onVertexPicked)
+                    onVertexPicked: onVertexPicked,
+                    onVisionPD: onVisionPD)
     }
 
     func makeUIView(context: Context) -> ARSCNView {
@@ -96,6 +100,12 @@ struct ARFaceTrackingView: UIViewRepresentable {
         var highlightedVertices: [Int] = []
         private let onSampleReady: ((FaceAnchorSample) -> Void)?
         private let onVertexPicked: ((Int) -> Void)?
+        private let onVisionPD: ((Float?) -> Void)?
+
+        // Vision pupil detection (debug). visionBusy is touched only on main
+        // (ARSession delegate callbacks arrive on the main queue here).
+        private let visionDetector = VisionPupilDetector()
+        private var visionBusy = false
 
         private weak var allDotsNode: SCNNode?
         private weak var eyelidDotsNode: SCNNode?
@@ -111,11 +121,13 @@ struct ARFaceTrackingView: UIViewRepresentable {
         init(faceDetected: Binding<Bool>,
              showVertexDots: Bool,
              onSampleReady: ((FaceAnchorSample) -> Void)?,
-             onVertexPicked: ((Int) -> Void)?) {
+             onVertexPicked: ((Int) -> Void)?,
+             onVisionPD: ((Float?) -> Void)?) {
             _faceDetected = faceDetected
             self.showVertexDots = showVertexDots
             self.onSampleReady = onSampleReady
             self.onVertexPicked = onVertexPicked
+            self.onVisionPD = onVisionPD
         }
 
         // MARK: - Mesh rendering (ARSCNViewDelegate)
@@ -284,6 +296,34 @@ struct ARFaceTrackingView: UIViewRepresentable {
             material.readsFromDepthBuffer = false
             geometry.firstMaterial = material
             return geometry
+        }
+
+        // MARK: - Vision pupil PD (ARSessionDelegate frame)
+
+        /// Throttled (one in-flight at a time): runs Vision on the camera frame to
+        /// detect pupils and convert to a PD in mm using focal length + ARKit depth.
+        func session(_ session: ARSession, didUpdate frame: ARFrame) {
+            guard let onVisionPD, !visionBusy,
+                  let faceAnchor = frame.anchors.compactMap({ $0 as? ARFaceAnchor }).first else {
+                return
+            }
+
+            // Depth = distance from camera to the face, along the camera axis.
+            let cameraInverse = simd_inverse(frame.camera.transform)
+            let faceInCamera = cameraInverse * faceAnchor.transform.columns.3
+            let depth = abs(faceInCamera.z)
+            let focalLengthPx = frame.camera.intrinsics.columns.0.x
+            let pixelBuffer = frame.capturedImage
+
+            visionBusy = true
+            visionDetector.detectPD(pixelBuffer: pixelBuffer,
+                                    focalLengthPx: focalLengthPx,
+                                    depthMetres: depth) { [weak self] pd in
+                DispatchQueue.main.async {
+                    self?.visionBusy = false
+                    onVisionPD(pd)
+                }
+            }
         }
 
         // MARK: - Detection state (ARSessionDelegate)

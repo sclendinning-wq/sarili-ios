@@ -22,6 +22,7 @@ struct ContentView: View {
     @State private var detecting = false
     @State private var detectedLeft: [Int] = []
     @State private var detectedRight: [Int] = []
+    @State private var visionPDmm: Float?   // latest Vision pupil PD (async)
 
     enum ScanState {
         case requestingPermission
@@ -38,7 +39,8 @@ struct ContentView: View {
         let faceOrigin: SIMD3<Float>
         let eyeTransformPDmm: Float      // eye-transform PD, millimetres
         let eyelidPDmm: Float?           // eyelid-centroid PD (world space); nil until rim indices set
-        let combinedPDmm: Float?         // mean of the two methods; nil unless both available
+        let visionPDmm: Float?           // Vision pupil PD from the camera image; nil until detected
+        let combinedPDmm: Float?         // mean of all available methods; nil unless >= 2 present
     }
 
     var body: some View {
@@ -49,7 +51,8 @@ struct ContentView: View {
                                    showVertexDots: showVertexDots,
                                    onSampleReady: handleSample,
                                    onVertexPicked: { tappedVertex = $0 },
-                                   highlightedVertices: detectedLeft + detectedRight)
+                                   highlightedVertices: detectedLeft + detectedRight,
+                                   onVisionPD: { visionPDmm = $0 })
                     .ignoresSafeArea()
             case .cameraDenied:
                 deniedView
@@ -223,6 +226,7 @@ struct ContentView: View {
             // Side-by-side PD comparison.
             Text("Eye transform PD:     \(mm(r.eyeTransformPDmm))")
             Text("Eyelid centroid PD:   \(r.eyelidPDmm.map(mm) ?? "n/a — set eyelid rim indices")")
+            Text("Vision pupil PD:      \(r.visionPDmm.map(mm) ?? "n/a")")
             Text("Combined average PD:  \(r.combinedPDmm.map(mm) ?? "n/a")")
             Text("Coordinate space:     world")
         }
@@ -280,9 +284,12 @@ struct ContentView: View {
             eyelidPDmm = pdMetres * 1000 + EyeLandmarks.pdCalibrationOffsetMM
         }
 
-        // --- Combined average PD --- only when both methods are available.
+        // --- Combined average PD --- mean of all available methods (>= 2 present).
         let eyeTransformPDmm = eyeDistance * 1000
-        let combinedPDmm = eyelidPDmm.map { ($0 + eyeTransformPDmm) / 2 }
+        let available = [eyeTransformPDmm, eyelidPDmm, visionPDmm].compactMap { $0 }
+        let combinedPDmm = available.count >= 2
+            ? available.reduce(0, +) / Float(available.count)
+            : nil
 
         readout = FaceReadout(
             leftEye: sample.leftEye,
@@ -291,6 +298,7 @@ struct ContentView: View {
             faceOrigin: sample.faceOrigin,
             eyeTransformPDmm: eyeTransformPDmm,
             eyelidPDmm: eyelidPDmm,
+            visionPDmm: visionPDmm,
             combinedPDmm: combinedPDmm
         )
     }
