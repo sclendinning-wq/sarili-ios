@@ -38,6 +38,7 @@ struct ContentView: View {
         let faceOrigin: SIMD3<Float>
         let eyeTransformPDmm: Float      // eye-transform PD, millimetres
         let eyelidPDmm: Float?           // eyelid-centroid PD (world space); nil until rim indices set
+        let combinedPDmm: Float?         // mean of the two methods; nil unless both available
     }
 
     var body: some View {
@@ -222,6 +223,7 @@ struct ContentView: View {
             // Side-by-side PD comparison.
             Text("Eye transform PD:     \(mm(r.eyeTransformPDmm))")
             Text("Eyelid centroid PD:   \(r.eyelidPDmm.map(mm) ?? "n/a — set eyelid rim indices")")
+            Text("Combined average PD:  \(r.combinedPDmm.map(mm) ?? "n/a")")
             Text("Coordinate space:     world")
         }
         .font(.system(.caption2, design: .monospaced))
@@ -278,13 +280,18 @@ struct ContentView: View {
             eyelidPDmm = pdMetres * 1000 + EyeLandmarks.pdCalibrationOffsetMM
         }
 
+        // --- Combined average PD --- only when both methods are available.
+        let eyeTransformPDmm = eyeDistance * 1000
+        let combinedPDmm = eyelidPDmm.map { ($0 + eyeTransformPDmm) / 2 }
+
         readout = FaceReadout(
             leftEye: sample.leftEye,
             rightEye: sample.rightEye,
             eyeDistance: eyeDistance,
             faceOrigin: sample.faceOrigin,
-            eyeTransformPDmm: eyeDistance * 1000,
-            eyelidPDmm: eyelidPDmm
+            eyeTransformPDmm: eyeTransformPDmm,
+            eyelidPDmm: eyelidPDmm,
+            combinedPDmm: combinedPDmm
         )
     }
 
