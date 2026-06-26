@@ -35,6 +35,10 @@ struct ARFaceTrackingView: UIViewRepresentable {
     /// tap, so eyelid rim indices can be identified directly on device.
     var onVertexPicked: ((Int) -> Void)? = nil
 
+    /// DEBUG-ONLY: vertex indices to highlight (e.g. auto-detected eyelid rims).
+    /// Falls back to EyeLandmarks.allEyeRim when empty.
+    var highlightedVertices: [Int] = []
+
     func makeCoordinator() -> Coordinator {
         Coordinator(faceDetected: $faceDetected,
                     showVertexDots: showVertexDots,
@@ -70,8 +74,9 @@ struct ARFaceTrackingView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: ARSCNView, context: Context) {
-        // Propagate the debug toggle into the live coordinator.
+        // Propagate debug state into the live coordinator.
         context.coordinator.showVertexDots = showVertexDots
+        context.coordinator.highlightedVertices = highlightedVertices
     }
 
     static func dismantleUIView(_ uiView: ARSCNView, coordinator: Coordinator) {
@@ -86,8 +91,9 @@ struct ARFaceTrackingView: UIViewRepresentable {
     /// SwiftUI state must only be mutated on the main thread.
     final class Coordinator: NSObject, ARSCNViewDelegate, ARSessionDelegate {
         @Binding private var faceDetected: Bool
-        // DEBUG-ONLY shared mutable flag (render thread reads, main thread writes).
+        // DEBUG-ONLY shared mutable flags (render thread reads, main thread writes).
         var showVertexDots: Bool
+        var highlightedVertices: [Int] = []
         private let onSampleReady: ((FaceAnchorSample) -> Void)?
         private let onVertexPicked: ((Int) -> Void)?
 
@@ -170,12 +176,16 @@ struct ARFaceTrackingView: UIViewRepresentable {
             let l = faceAnchor.leftEyeTransform.columns.3
             let r = faceAnchor.rightEyeTransform.columns.3
             let o = faceAnchor.transform.columns.3
+            let blinkL = faceAnchor.blendShapes[.eyeBlinkLeft]?.floatValue ?? 0
+            let blinkR = faceAnchor.blendShapes[.eyeBlinkRight]?.floatValue ?? 0
             let sample = FaceAnchorSample(
                 leftEye: SIMD3<Float>(l.x, l.y, l.z),
                 rightEye: SIMD3<Float>(r.x, r.y, r.z),
                 faceOrigin: SIMD3<Float>(o.x, o.y, o.z),
                 vertices: Array(faceAnchor.geometry.vertices),
-                faceTransform: faceAnchor.transform
+                faceTransform: faceAnchor.transform,
+                blinkLeft: blinkL,
+                blinkRight: blinkR
             )
 
             DispatchQueue.main.async {
@@ -205,8 +215,10 @@ struct ARFaceTrackingView: UIViewRepresentable {
             allDotsNode?.isHidden = false
 
             // Eyelid rim vertices: large, distinct cyan dots so the loops stand
-            // out clearly against the white cloud (empty until indices confirmed).
-            let eyelidPoints = EyeLandmarks.allEyeRim
+            // out clearly against the white cloud. Prefer live-highlighted
+            // (auto-detected) indices; fall back to the static EyeLandmarks set.
+            let highlightSource = highlightedVertices.isEmpty ? EyeLandmarks.allEyeRim : highlightedVertices
+            let eyelidPoints = highlightSource
                 .filter { $0 >= 0 && $0 < vertices.count }
                 .map { SCNVector3(vertices[$0].x, vertices[$0].y, vertices[$0].z) }
             eyelidDotsNode?.geometry = eyelidPoints.isEmpty

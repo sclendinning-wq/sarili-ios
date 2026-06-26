@@ -22,4 +22,8 @@ struct FaceAnchorSample: Sendable {
     let vertices: [SIMD3<Float>]
     /// Face anchor world transform, for converting local vertices to world space.
     let faceTransform: simd_float4x4
+    /// eyeBlinkLeft blend-shape coefficient [0,1].
+    let blinkLeft: Float
+    /// eyeBlinkRight blend-shape coefficient [0,1].
+    let blinkRight: Float
 }

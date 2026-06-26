@@ -17,11 +17,11 @@ struct ContentView: View {
     @State private var showVertexDots = false
     @State private var tappedVertex: Int?
 
-    // DEBUG-ONLY: eyelid index collection state.
-    @State private var collectingEye: Eye = .left
-    @State private var leftCollected: [Int] = []
-    @State private var rightCollected: [Int] = []
-    @State private var collectionHistory: [Eye] = []   // order of adds, for Undo
+    // DEBUG-ONLY: automatic eyelid index detection state.
+    @State private var detector = EyelidIndexDetector()
+    @State private var detecting = false
+    @State private var detectedLeft: [Int] = []
+    @State private var detectedRight: [Int] = []
 
     enum ScanState {
         case requestingPermission
@@ -29,8 +29,6 @@ struct ContentView: View {
         case unsupported       // device has no TrueDepth camera / no face tracking
         case ready             // camera authorized and face tracking supported
     }
-
-    enum Eye { case left, right }
 
     /// Raw ARKit floats forwarded from the face anchor. No averaging, single frame.
     struct FaceReadout: Sendable {
@@ -49,7 +47,8 @@ struct ContentView: View {
                 ARFaceTrackingView(faceDetected: $faceDetected,
                                    showVertexDots: showVertexDots,
                                    onSampleReady: handleSample,
-                                   onVertexPicked: handleVertexTap)
+                                   onVertexPicked: { tappedVertex = $0 },
+                                   highlightedVertices: detectedLeft + detectedRight)
                     .ignoresSafeArea()
             case .cameraDenied:
                 deniedView
@@ -74,7 +73,7 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                     .padding(.top, 76)
 
-                collectionPanel
+                detectionPanel
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                     .padding(12)
             } else if scanState == .ready, let readout {
@@ -146,21 +145,22 @@ struct ContentView: View {
             .background(.black.opacity(0.55), in: Capsule())
     }
 
-    // MARK: - Eyelid index collection (debug)
+    // MARK: - Automatic eyelid detection (debug)
 
-    /// DEBUG-ONLY: collect tapped vertex indices into per-eye lists, with
-    /// undo/clear/copy, so eyelid rim indices can be gathered on device.
-    private var collectionPanel: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Picker("Collecting", selection: $collectingEye) {
-                Text("Left Eye").tag(Eye.left)
-                Text("Right Eye").tag(Eye.right)
-            }
-            .pickerStyle(.segmented)
+    /// DEBUG-ONLY: blink-based eyelid index detection. Start it, blink a few
+    /// times; detected indices are used live and can be copied into code.
+    private var detectionPanel: some View {
+        let hasResult = !detectedLeft.isEmpty || !detectedRight.isEmpty
+        return VStack(alignment: .leading, spacing: 10) {
+            Text(detecting
+                 ? "Detecting… blink 3 times, hold still"
+                 : (hasResult ? "Detected ✓ (using live)" : "Auto-detect eyelid vertices via blink"))
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(detecting ? .yellow : (hasResult ? .green : .white))
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("Left eyelid indices:  \(format(leftCollected))")
-                Text("Right eyelid indices: \(format(rightCollected))")
+                Text("Left eyelid indices:  \(format(detectedLeft))")
+                Text("Right eyelid indices: \(format(detectedRight))")
             }
             .font(.system(.caption2, design: .monospaced))
             .foregroundStyle(.white)
@@ -169,10 +169,10 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             HStack(spacing: 8) {
-                Button("Undo last", action: undoLast)
-                Button("Clear left", action: clearLeft)
-                Button("Clear right", action: clearRight)
+                Button(detecting ? "Detecting…" : "Detect (blink 3×)", action: startDetection)
+                    .disabled(detecting)
                 Button("Copy indices", action: copyIndices)
+                    .disabled(!hasResult)
             }
             .font(.caption2)
             .controlSize(.small)
@@ -189,47 +189,20 @@ struct ContentView: View {
         "[" + list.map(String.init).joined(separator: ", ") + "]"
     }
 
-    /// Called on the main thread when a vertex is tapped. Marks it (yellow) and,
-    /// while collecting, appends it to the selected eye list (no duplicates).
-    private func handleVertexTap(_ index: Int) {
-        tappedVertex = index
-        guard showVertexDots else { return }
-        switch collectingEye {
-        case .left:
-            guard !leftCollected.contains(index) else { return }
-            leftCollected.append(index)
-        case .right:
-            guard !rightCollected.contains(index) else { return }
-            rightCollected.append(index)
-        }
-        collectionHistory.append(collectingEye)
-    }
-
-    private func undoLast() {
-        guard let last = collectionHistory.popLast() else { return }
-        switch last {
-        case .left:  if !leftCollected.isEmpty { leftCollected.removeLast() }
-        case .right: if !rightCollected.isEmpty { rightCollected.removeLast() }
-        }
-    }
-
-    private func clearLeft() {
-        leftCollected.removeAll()
-        collectionHistory.removeAll { $0 == .left }
-    }
-
-    private func clearRight() {
-        rightCollected.removeAll()
-        collectionHistory.removeAll { $0 == .right }
+    private func startDetection() {
+        detectedLeft = []
+        detectedRight = []
+        detector = EyelidIndexDetector()   // fresh run
+        detecting = true
     }
 
     private func copyIndices() {
         let text = """
         Left eyelid rim indices:
-        \(format(leftCollected))
+        \(format(detectedLeft))
 
         Right eyelid rim indices:
-        \(format(rightCollected))
+        \(format(detectedRight))
         """
         UIPasteboard.general.string = text
     }
@@ -271,6 +244,22 @@ struct ContentView: View {
     /// all measurement here, decoupled from the mesh renderer and the render
     /// thread. No raw ARFaceAnchor is involved.
     private func handleSample(_ sample: FaceAnchorSample) {
+        // --- Eyelid auto-detection (debug) ---
+        if detecting {
+            if detector.phase == .idle { detector.start(vertexCount: sample.vertices.count) }
+            let blink = max(sample.blinkLeft, sample.blinkRight)
+            if let result = detector.ingest(vertices: sample.vertices,
+                                            leftEyeX: sample.leftEye.x,
+                                            rightEyeX: sample.rightEye.x,
+                                            blink: blink) {
+                detectedLeft = result.left
+                detectedRight = result.right
+                detecting = false
+                print("[Sarili] Detected left eyelid indices: \(format(result.left))")
+                print("[Sarili] Detected right eyelid indices: \(format(result.right))")
+            }
+        }
+
         // --- Eye-transform PD (existing approach, kept for comparison) ---
         let eyeDistance = simd_distance(sample.leftEye, sample.rightEye)
 
@@ -278,10 +267,13 @@ struct ContentView: View {
         // ARFaceGeometry.vertices are in face-local space; transform to world
         // before measuring. Each eye centre is the centroid of its eyelid rim
         // loop; PD is the distance between the two centres, plus an empirical
-        // calibration offset (0 until validated against clinical PD).
+        // calibration offset (0 until validated against clinical PD). Prefer
+        // auto-detected indices; fall back to the static EyeLandmarks set.
+        let leftIndices = detectedLeft.isEmpty ? EyeLandmarks.leftEyeRim : detectedLeft
+        let rightIndices = detectedRight.isEmpty ? EyeLandmarks.rightEyeRim : detectedRight
         var eyelidPDmm: Float?
-        if let leftCentre = worldEyeCentre(EyeLandmarks.leftEyeRim, sample.vertices, sample.faceTransform),
-           let rightCentre = worldEyeCentre(EyeLandmarks.rightEyeRim, sample.vertices, sample.faceTransform) {
+        if let leftCentre = worldEyeCentre(leftIndices, sample.vertices, sample.faceTransform),
+           let rightCentre = worldEyeCentre(rightIndices, sample.vertices, sample.faceTransform) {
             let pdMetres = simd_distance(leftCentre, rightCentre)
             eyelidPDmm = pdMetres * 1000 + EyeLandmarks.pdCalibrationOffsetMM
         }
