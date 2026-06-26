@@ -223,11 +223,11 @@ struct ContentView: View {
 
             Divider().overlay(.green.opacity(0.4))
 
-            // Side-by-side PD comparison.
+            // PD comparison. Vision pupil PD is the method we validate against
+            // clinical; eyelid-centroid / combined stay computed in code but are
+            // no longer surfaced here.
             Text("Eye transform PD:     \(mm(r.eyeTransformPDmm))")
-            Text("Eyelid centroid PD:   \(r.eyelidPDmm.map(mm) ?? "n/a — set eyelid rim indices")")
             Text("Vision pupil PD:      \(r.visionPDmm.map(mm) ?? "n/a")")
-            Text("Combined average PD:  \(r.combinedPDmm.map(mm) ?? "n/a")")
             Text("Coordinate space:     world")
         }
         .font(.system(.caption2, design: .monospaced))
