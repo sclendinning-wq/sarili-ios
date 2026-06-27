@@ -11,6 +11,8 @@ import ARKit
 import simd
 
 struct ContentView: View {
+    var onOpenCardPD: () -> Void = {}
+
     @State private var faceDetected = false
     @State private var scanState: ScanState = .requestingPermission
     @State private var readout: FaceReadout?
@@ -63,6 +65,18 @@ struct ContentView: View {
             }
 
             statusBadge
+
+            // Entry to the separate card-reference PD flow (works without TrueDepth).
+            Button { onOpenCardPD() } label: {
+                Label("Card PD", systemImage: "creditcard")
+                    .font(.system(.caption, design: .monospaced))
+                    .padding(.horizontal, 12).padding(.vertical, 8)
+                    .background(.ultraThinMaterial, in: Capsule())
+            }
+            .tint(.white)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+            .padding(.bottom, 24)
+            .padding(.trailing, 16)
 
             if scanState == .ready {
                 vertexToggle
