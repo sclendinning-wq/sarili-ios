@@ -249,12 +249,11 @@ struct ContentView: View {
 
     // MARK: - Landmark overlay (debug)
 
-    /// Draws every layer of the Vision coordinate path so a misplacement reveals
-    /// which step is wrong. Colours:
-    ///   white  = face bounding box
-    ///   green  = left eye contour      blue   = right eye contour
-    ///   yellow = left pupil points     pink   = right pupil points
-    ///   red    = computed pupil centres + cyan line between them
+    /// Draws BOTH coordinate conversions so we can tell whether our manual
+    /// composition is wrong or Vision's landmarks themselves are poor.
+    ///   white       = face bounding box
+    ///   MANUAL (filled): green/blue eye contours, yellow/pink pupil pts, red centres + cyan line
+    ///   APPLE  (hollow): green/blue eye contours, orange/purple pupil pts, white centres + white line
     private var pupilOverlay: some View {
         Canvas { ctx, size in
             guard let v = visionDebug, let lm = v.landmarks, let imageSize = v.imageSize else { return }
@@ -262,6 +261,14 @@ struct ContentView: View {
             func dot(_ p: CGPoint, _ r: CGFloat, _ color: Color) {
                 ctx.fill(Path(ellipseIn: CGRect(x: p.x - r, y: p.y - r, width: r * 2, height: r * 2)),
                          with: .color(color))
+            }
+            func ring(_ p: CGPoint, _ r: CGFloat, _ color: Color) {
+                ctx.stroke(Path(ellipseIn: CGRect(x: p.x - r, y: p.y - r, width: r * 2, height: r * 2)),
+                           with: .color(color), lineWidth: 1.5)
+            }
+            func link(_ a: CGPoint, _ b: CGPoint, _ color: Color, _ width: CGFloat) {
+                var line = Path(); line.move(to: a); line.addLine(to: b)
+                ctx.stroke(line, with: .color(color), lineWidth: width)
             }
 
             // Bounding box (map all 4 corners so flips stay correct).
@@ -271,16 +278,22 @@ struct ContentView: View {
             var box = Path(); box.addLines(corners + [corners[0]])
             ctx.stroke(box, with: .color(.white), lineWidth: 2)
 
+            // A. Manual — filled dots.
             for p in lm.leftEyeContour  { dot(m(p), 2.5, .green) }
             for p in lm.rightEyeContour { dot(m(p), 2.5, .blue) }
             for p in lm.leftPupilPoints  { dot(m(p), 3, .yellow) }
             for p in lm.rightPupilPoints { dot(m(p), 3, .pink) }
-
             if let lc = lm.leftPupilCentre, let rc = lm.rightPupilCentre {
-                let a = m(lc), b = m(rc)
-                var line = Path(); line.move(to: a); line.addLine(to: b)
-                ctx.stroke(line, with: .color(.cyan), lineWidth: 2)
-                dot(a, 6, .red); dot(b, 6, .red)
+                link(m(lc), m(rc), .cyan, 2); dot(m(lc), 6, .red); dot(m(rc), 6, .red)
+            }
+
+            // B. Apple pointsInImage — hollow rings / contrasting colours.
+            for p in lm.appleLeftEyeContour  { ring(m(p), 3.5, .green) }
+            for p in lm.appleRightEyeContour { ring(m(p), 3.5, .blue) }
+            for p in lm.appleLeftPupilPoints  { dot(m(p), 3, .orange) }
+            for p in lm.appleRightPupilPoints { dot(m(p), 3, .purple) }
+            if let lc = lm.appleLeftPupilCentre, let rc = lm.appleRightPupilCentre {
+                link(m(lc), m(rc), .white, 1.5); ring(m(lc), 7, .white); ring(m(rc), 7, .white)
             }
         }
         .allowsHitTesting(false)

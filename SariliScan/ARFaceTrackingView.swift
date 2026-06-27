@@ -365,11 +365,16 @@ struct ARFaceTrackingView: UIViewRepresentable {
                     else if det?.usedFallback == true { mode = "fallback eye region" }
                     else { mode = "pupil landmarks" }
 
-                    // Confidence heuristic: real pupil landmarks, plausible PD, and
-                    // a steady reading. Anything else means "go check the overlay".
+                    // Confidence: a coarse single pupil point per eye can never be
+                    // trusted on PD plausibility alone — require visual confirmation.
+                    let coarsePupil = (det?.leftPupilPoints.count ?? 0) <= 1
+                        || (det?.rightPupilPoints.count ?? 0) <= 1
                     let pdOK = (result?.pdMM).map { $0 >= 45 && $0 <= 80 } ?? false
-                    let confidence = (mode == "pupil landmarks" && pdOK && variance < 3)
-                        ? "OK" : "needs checking"
+                    let confidence: String
+                    if mode != "pupil landmarks" { confidence = "needs checking" }
+                    else if coarsePupil { confidence = "needs visual confirmation" }
+                    else if pdOK && variance < 3 { confidence = "OK" }
+                    else { confidence = "needs checking" }
 
                     let landmarks = det.map {
                         VisionLandmarks(boundingBox: $0.boundingBox,
@@ -378,7 +383,13 @@ struct ARFaceTrackingView: UIViewRepresentable {
                                         leftPupilPoints: $0.leftPupilPoints,
                                         rightPupilPoints: $0.rightPupilPoints,
                                         leftPupilCentre: $0.leftPupilCentre,
-                                        rightPupilCentre: $0.rightPupilCentre)
+                                        rightPupilCentre: $0.rightPupilCentre,
+                                        appleLeftEyeContour: $0.appleLeftEyeContour,
+                                        appleRightEyeContour: $0.appleRightEyeContour,
+                                        appleLeftPupilPoints: $0.appleLeftPupilPoints,
+                                        appleRightPupilPoints: $0.appleRightPupilPoints,
+                                        appleLeftPupilCentre: $0.appleLeftPupilCentre,
+                                        appleRightPupilCentre: $0.appleRightPupilCentre)
                     }
 
                     onVisionDebug(VisionDebugInfo(

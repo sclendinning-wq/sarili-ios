@@ -61,12 +61,20 @@ enum PreviewMapping: String, CaseIterable, Sendable {
 struct PupilDetectionResult {
     let imageSize: CGSize
     let boundingBox: CGRect
+    // A. Manual conversion (normalizedPoints composed with the bounding box).
     let leftEyeContour: [CGPoint]
     let rightEyeContour: [CGPoint]
     let leftPupilPoints: [CGPoint]
     let rightPupilPoints: [CGPoint]
     let leftPupilCentre: CGPoint?
     let rightPupilCentre: CGPoint?
+    // B. Apple conversion (pointsInImage normalised back to overlay coords).
+    let appleLeftEyeContour: [CGPoint]
+    let appleRightEyeContour: [CGPoint]
+    let appleLeftPupilPoints: [CGPoint]
+    let appleRightPupilPoints: [CGPoint]
+    let appleLeftPupilCentre: CGPoint?
+    let appleRightPupilCentre: CGPoint?
     let usedFallback: Bool
 }
 
@@ -104,39 +112,49 @@ final class VisionPupilDetector: PupilDetector {
                 ? CGSize(width: h, height: w)
                 : CGSize(width: w, height: h)
 
-            // EXPLICIT coordinate composition: region-local (inside bbox, BL) ->
-            // full-image normalised (BL) -> top-left origin.
             let bbox = face.boundingBox   // full-image normalised, bottom-left
-            func toFullTopLeft(_ np: CGPoint) -> CGPoint {
-                let fx = bbox.origin.x + np.x * bbox.size.width
-                let fyBottomLeft = bbox.origin.y + np.y * bbox.size.height
-                return CGPoint(x: fx, y: 1 - fyBottomLeft)
-            }
-            func region(_ r: VNFaceLandmarkRegion2D?) -> [CGPoint] {
-                (r?.normalizedPoints ?? []).map(toFullTopLeft)
-            }
+
             func centroid(_ pts: [CGPoint]) -> CGPoint? {
                 guard !pts.isEmpty else { return nil }
                 let s = pts.reduce(CGPoint.zero) { CGPoint(x: $0.x + $1.x, y: $0.y + $1.y) }
                 return CGPoint(x: s.x / CGFloat(pts.count), y: s.y / CGFloat(pts.count))
             }
 
-            let leftEye = region(landmarks.leftEye)
-            let rightEye = region(landmarks.rightEye)
-            let leftPupilPts = region(landmarks.leftPupil)
-            let rightPupilPts = region(landmarks.rightPupil)
+            // A. MANUAL: compose region-local normalizedPoints (BL, inside bbox)
+            //    with the bounding box -> full-image normalised -> top-left.
+            func manual(_ r: VNFaceLandmarkRegion2D?) -> [CGPoint] {
+                (r?.normalizedPoints ?? []).map { np in
+                    let fx = bbox.origin.x + np.x * bbox.size.width
+                    let fyBL = bbox.origin.y + np.y * bbox.size.height
+                    return CGPoint(x: fx, y: 1 - fyBL)
+                }
+            }
+            // B. APPLE: pointsInImage (full-image pixels, BL) -> normalised -> top-left.
+            func apple(_ r: VNFaceLandmarkRegion2D?) -> [CGPoint] {
+                guard let r else { return [] }
+                return r.pointsInImage(imageSize: imageSize).map {
+                    CGPoint(x: $0.x / imageSize.width, y: 1 - $0.y / imageSize.height)
+                }
+            }
 
+            let mLeftEye = manual(landmarks.leftEye),   mRightEye = manual(landmarks.rightEye)
+            let mLeftPupil = manual(landmarks.leftPupil), mRightPupil = manual(landmarks.rightPupil)
+            let aLeftEye = apple(landmarks.leftEye),     aRightEye = apple(landmarks.rightEye)
+            let aLeftPupil = apple(landmarks.leftPupil), aRightPupil = apple(landmarks.rightPupil)
+
+            // Manual centres drive the PD; fall back to eye contour if no pupils.
             var usedFallback = false
-            var leftCentre = centroid(leftPupilPts)
-            var rightCentre = centroid(rightPupilPts)
-            if leftCentre == nil || rightCentre == nil {
-                leftCentre = centroid(leftEye)
-                rightCentre = centroid(rightEye)
+            var mLeftCentre = centroid(mLeftPupil)
+            var mRightCentre = centroid(mRightPupil)
+            if mLeftCentre == nil || mRightCentre == nil {
+                mLeftCentre = centroid(mLeftEye)
+                mRightCentre = centroid(mRightEye)
                 usedFallback = true
                 print("[Sarili] Vision pupil landmarks unavailable — using eye-region fallback")
             }
+            let aLeftCentre = centroid(aLeftPupil) ?? centroid(aLeftEye)
+            let aRightCentre = centroid(aRightPupil) ?? centroid(aRightEye)
 
-            // Bounding box to top-left origin for the overlay.
             let bboxTL = CGRect(x: bbox.origin.x,
                                 y: 1 - bbox.origin.y - bbox.size.height,
                                 width: bbox.size.width,
@@ -145,12 +163,18 @@ final class VisionPupilDetector: PupilDetector {
             completion(PupilDetectionResult(
                 imageSize: imageSize,
                 boundingBox: bboxTL,
-                leftEyeContour: leftEye,
-                rightEyeContour: rightEye,
-                leftPupilPoints: leftPupilPts,
-                rightPupilPoints: rightPupilPts,
-                leftPupilCentre: leftCentre,
-                rightPupilCentre: rightCentre,
+                leftEyeContour: mLeftEye,
+                rightEyeContour: mRightEye,
+                leftPupilPoints: mLeftPupil,
+                rightPupilPoints: mRightPupil,
+                leftPupilCentre: mLeftCentre,
+                rightPupilCentre: mRightCentre,
+                appleLeftEyeContour: aLeftEye,
+                appleRightEyeContour: aRightEye,
+                appleLeftPupilPoints: aLeftPupil,
+                appleRightPupilPoints: aRightPupil,
+                appleLeftPupilCentre: aLeftCentre,
+                appleRightPupilCentre: aRightCentre,
                 usedFallback: usedFallback
             ))
         }
@@ -193,12 +217,20 @@ struct VisionPDPipeline {
 /// Landmark geometry for the overlay (full-image normalised, top-left origin).
 struct VisionLandmarks: Sendable {
     let boundingBox: CGRect
+    // A. Manual conversion
     let leftEyeContour: [CGPoint]
     let rightEyeContour: [CGPoint]
     let leftPupilPoints: [CGPoint]
     let rightPupilPoints: [CGPoint]
     let leftPupilCentre: CGPoint?
     let rightPupilCentre: CGPoint?
+    // B. Apple pointsInImage conversion
+    let appleLeftEyeContour: [CGPoint]
+    let appleRightEyeContour: [CGPoint]
+    let appleLeftPupilPoints: [CGPoint]
+    let appleRightPupilPoints: [CGPoint]
+    let appleLeftPupilCentre: CGPoint?
+    let appleRightPupilCentre: CGPoint?
 }
 
 struct VisionDebugInfo: Sendable {
