@@ -10,9 +10,17 @@
 //      3. convert pixels -> mm   (VisionPDPipeline)
 //      4. display / log result   (VisionDebugInfo, assembled by the caller)
 //
-//  Stage 1 is behind the `PupilDetector` protocol so the Vision landmark
-//  detector can later be swapped for a custom iris detector without touching
-//  the conversion / display stages.
+//  COORDINATE PATH (made explicit so it can be inspected):
+//
+//      VNFaceLandmarkRegion2D.normalizedPoints   // normalised INSIDE the
+//                                                // face bounding box, BL origin
+//        -> compose with VNFaceObservation.boundingBox (also normalised, BL)
+//        -> full-image normalised point          // [0,1] over the whole image
+//        -> flip Y to top-left origin            // for SwiftUI overlay
+//
+//  We deliberately do NOT use `pointsInImage(imageSize:)` here: composing the
+//  bounding box by hand makes the "are these region-local or full-image points?"
+//  question explicit, which is the exact thing we're trying to verify.
 //
 
 import Foundation
@@ -20,13 +28,10 @@ import Vision
 import CoreVideo
 import CoreGraphics
 
-// MARK: - Orientation (single source, easy to switch on device)
+// MARK: - Orientation + mapping (single source, switchable on device)
 
-/// The orientations we want to test for ARKit's `capturedImage`. Change in ONE
-/// place; the on-screen control cycles through these without rebuilding.
 enum VisionImageOrientation: String, CaseIterable, Sendable {
     case leftMirrored, rightMirrored, up, down
-
     var cg: CGImagePropertyOrientation {
         switch self {
         case .leftMirrored: return .leftMirrored
@@ -35,32 +40,42 @@ enum VisionImageOrientation: String, CaseIterable, Sendable {
         case .down: return .down
         }
     }
-
-    /// Default to start from; confirm/adjust on device.
     static let initial: VisionImageOrientation = .leftMirrored
+}
+
+/// X/Y flip applied to normalised points before drawing.
+enum MappingMode: String, CaseIterable, Sendable {
+    case normal, flipX, flipY, flipXY
+}
+
+/// How the camera preview fills the view — must match for the overlay to align.
+enum PreviewMapping: String, CaseIterable, Sendable {
+    case aspectFill, aspectFit
 }
 
 // MARK: - Stage 1: pupil detection (swappable)
 
-/// Pupil centres in image pixel coordinates (oriented image space) plus the
-/// image size used, and whether the eye-region fallback stood in for pupils.
+/// All landmark geometry for one face, in FULL-IMAGE normalised coordinates with
+/// a TOP-LEFT origin (ready for a SwiftUI overlay). Pupil centres are the
+/// centroids of the pupil landmark points (or eye contour on fallback).
 struct PupilDetectionResult {
-    let left: CGPoint
-    let right: CGPoint
     let imageSize: CGSize
+    let boundingBox: CGRect
+    let leftEyeContour: [CGPoint]
+    let rightEyeContour: [CGPoint]
+    let leftPupilPoints: [CGPoint]
+    let rightPupilPoints: [CGPoint]
+    let leftPupilCentre: CGPoint?
+    let rightPupilCentre: CGPoint?
     let usedFallback: Bool
 }
 
-/// Swap-in point: any pupil detector (Vision landmarks today, a custom iris
-/// detector later) just needs to return two pupil pixel positions.
 protocol PupilDetector {
     func detectPupils(pixelBuffer: CVPixelBuffer,
                       orientation: CGImagePropertyOrientation,
                       completion: @escaping (PupilDetectionResult?) -> Void)
 }
 
-/// Vision-based pupil detector. Prefers `leftPupil`/`rightPupil`; if those are
-/// unavailable, falls back to the eye-region centroid and flags it.
 final class VisionPupilDetector: PupilDetector {
 
     private let queue = DispatchQueue(label: "com.sarili.vision.pupil", qos: .userInitiated)
@@ -73,12 +88,7 @@ final class VisionPupilDetector: PupilDetector {
             let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer,
                                                 orientation: orientation,
                                                 options: [:])
-            do {
-                try handler.perform([request])
-            } catch {
-                completion(nil)
-                return
-            }
+            do { try handler.perform([request]) } catch { completion(nil); return }
 
             guard let face = (request.results as? [VNFaceObservation])?.first,
                   let landmarks = face.landmarks else {
@@ -86,8 +96,7 @@ final class VisionPupilDetector: PupilDetector {
                 return
             }
 
-            // Image size in the oriented space Vision used (dims swap for 90°
-            // rotations) so pointsInImage maps onto the right pixel grid.
+            // Oriented image size (dims swap for 90° rotations).
             let w = CVPixelBufferGetWidth(pixelBuffer)
             let h = CVPixelBufferGetHeight(pixelBuffer)
             let rotated: [CGImagePropertyOrientation] = [.left, .right, .leftMirrored, .rightMirrored]
@@ -95,42 +104,67 @@ final class VisionPupilDetector: PupilDetector {
                 ? CGSize(width: h, height: w)
                 : CGSize(width: w, height: h)
 
-            // Centre of a landmark region = centroid of its image points.
-            func centre(_ region: VNFaceLandmarkRegion2D?) -> CGPoint? {
-                guard let region, region.pointCount > 0 else { return nil }
-                let pts = region.pointsInImage(imageSize: imageSize)
-                let sum = pts.reduce(CGPoint.zero) { CGPoint(x: $0.x + $1.x, y: $0.y + $1.y) }
-                return CGPoint(x: sum.x / CGFloat(pts.count), y: sum.y / CGFloat(pts.count))
+            // EXPLICIT coordinate composition: region-local (inside bbox, BL) ->
+            // full-image normalised (BL) -> top-left origin.
+            let bbox = face.boundingBox   // full-image normalised, bottom-left
+            func toFullTopLeft(_ np: CGPoint) -> CGPoint {
+                let fx = bbox.origin.x + np.x * bbox.size.width
+                let fyBottomLeft = bbox.origin.y + np.y * bbox.size.height
+                return CGPoint(x: fx, y: 1 - fyBottomLeft)
+            }
+            func region(_ r: VNFaceLandmarkRegion2D?) -> [CGPoint] {
+                (r?.normalizedPoints ?? []).map(toFullTopLeft)
+            }
+            func centroid(_ pts: [CGPoint]) -> CGPoint? {
+                guard !pts.isEmpty else { return nil }
+                let s = pts.reduce(CGPoint.zero) { CGPoint(x: $0.x + $1.x, y: $0.y + $1.y) }
+                return CGPoint(x: s.x / CGFloat(pts.count), y: s.y / CGFloat(pts.count))
             }
 
-            if let l = centre(landmarks.leftPupil), let r = centre(landmarks.rightPupil) {
-                completion(PupilDetectionResult(left: l, right: r, imageSize: imageSize, usedFallback: false))
-            } else if let l = centre(landmarks.leftEye), let r = centre(landmarks.rightEye) {
+            let leftEye = region(landmarks.leftEye)
+            let rightEye = region(landmarks.rightEye)
+            let leftPupilPts = region(landmarks.leftPupil)
+            let rightPupilPts = region(landmarks.rightPupil)
+
+            var usedFallback = false
+            var leftCentre = centroid(leftPupilPts)
+            var rightCentre = centroid(rightPupilPts)
+            if leftCentre == nil || rightCentre == nil {
+                leftCentre = centroid(leftEye)
+                rightCentre = centroid(rightEye)
+                usedFallback = true
                 print("[Sarili] Vision pupil landmarks unavailable — using eye-region fallback")
-                completion(PupilDetectionResult(left: l, right: r, imageSize: imageSize, usedFallback: true))
-            } else {
-                completion(nil)
             }
+
+            // Bounding box to top-left origin for the overlay.
+            let bboxTL = CGRect(x: bbox.origin.x,
+                                y: 1 - bbox.origin.y - bbox.size.height,
+                                width: bbox.size.width,
+                                height: bbox.size.height)
+
+            completion(PupilDetectionResult(
+                imageSize: imageSize,
+                boundingBox: bboxTL,
+                leftEyeContour: leftEye,
+                rightEyeContour: rightEye,
+                leftPupilPoints: leftPupilPts,
+                rightPupilPoints: rightPupilPts,
+                leftPupilCentre: leftCentre,
+                rightPupilCentre: rightCentre,
+                usedFallback: usedFallback
+            ))
         }
     }
 }
 
 // MARK: - Stage 3: pixels -> mm
 
-/// Output of the conversion stage (stage 4 then displays it).
 struct VisionPDResult {
-    let pdMM: Float
-    let pixelDistance: Float
-    let left: CGPoint
-    let right: CGPoint
-    let imageSize: CGSize
-    let usedFallback: Bool
+    let pdMM: Float?
+    let pixelDistance: Float?
+    let detection: PupilDetectionResult
 }
 
-/// Owns the swappable detector and turns pupil pixels into a PD in mm using the
-/// camera focal length and a caller-provided depth (stage 2).
-///
-///     PD_mm = pixelDistance * depth / fx * 1000
 struct VisionPDPipeline {
     var detector: PupilDetector
 
@@ -139,26 +173,34 @@ struct VisionPDPipeline {
                  depthMetres: Float,
                  orientation: CGImagePropertyOrientation,
                  completion: @escaping (VisionPDResult?) -> Void) {
-        detector.detectPupils(pixelBuffer: pixelBuffer, orientation: orientation) { pupils in
-            guard let pupils, fx > 0 else { completion(nil); return }
-            let pixelDistance = Float(hypot(pupils.left.x - pupils.right.x,
-                                            pupils.left.y - pupils.right.y))
-            let pdMM = pixelDistance * depthMetres / fx * 1000
-            completion(VisionPDResult(pdMM: pdMM,
-                                      pixelDistance: pixelDistance,
-                                      left: pupils.left,
-                                      right: pupils.right,
-                                      imageSize: pupils.imageSize,
-                                      usedFallback: pupils.usedFallback))
+        detector.detectPupils(pixelBuffer: pixelBuffer, orientation: orientation) { det in
+            guard let det else { completion(nil); return }
+            if let lc = det.leftPupilCentre, let rc = det.rightPupilCentre, fx > 0 {
+                let dxPx = Float(lc.x - rc.x) * Float(det.imageSize.width)
+                let dyPx = Float(lc.y - rc.y) * Float(det.imageSize.height)
+                let pixelDistance = (dxPx * dxPx + dyPx * dyPx).squareRoot()
+                let pdMM = pixelDistance * depthMetres / fx * 1000
+                completion(VisionPDResult(pdMM: pdMM, pixelDistance: pixelDistance, detection: det))
+            } else {
+                completion(VisionPDResult(pdMM: nil, pixelDistance: nil, detection: det))
+            }
         }
     }
 }
 
 // MARK: - Stage 4: display bundle
 
-/// Everything the on-screen test-harness readout + pupil overlay need for one
-/// frame. Pupil points are provided both in image pixels (for logging) and as
-/// top-left-origin normalised points (for drawing over the preview).
+/// Landmark geometry for the overlay (full-image normalised, top-left origin).
+struct VisionLandmarks: Sendable {
+    let boundingBox: CGRect
+    let leftEyeContour: [CGPoint]
+    let rightEyeContour: [CGPoint]
+    let leftPupilPoints: [CGPoint]
+    let rightPupilPoints: [CGPoint]
+    let leftPupilCentre: CGPoint?
+    let rightPupilCentre: CGPoint?
+}
+
 struct VisionDebugInfo: Sendable {
     let pdMM: Float?
     let pixelDistance: Float?
@@ -173,9 +215,6 @@ struct VisionDebugInfo: Sendable {
     let orientationName: String
     let detectorMode: String          // "pupil landmarks" / "fallback eye region" / "unavailable"
     let coordinateConfidence: String  // "OK" / "needs checking"
-    let leftPupilPx: CGPoint?
-    let rightPupilPx: CGPoint?
-    let leftPupilNorm: CGPoint?        // top-left normalised, for the overlay
-    let rightPupilNorm: CGPoint?
     let imageSize: CGSize?
+    let landmarks: VisionLandmarks?
 }

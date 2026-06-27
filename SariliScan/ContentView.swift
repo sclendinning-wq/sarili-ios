@@ -24,6 +24,8 @@ struct ContentView: View {
     @State private var detectedRight: [Int] = []
     @State private var visionDebug: VisionDebugInfo?   // latest Vision diagnostics (async)
     @State private var visionOrientation: VisionImageOrientation = .initial
+    @State private var mappingMode: MappingMode = .normal
+    @State private var previewMapping: PreviewMapping = .aspectFill
 
     enum ScanState {
         case requestingPermission
@@ -68,7 +70,7 @@ struct ContentView: View {
                     .padding(.top, 20)
                     .padding(.trailing, 16)
 
-                orientationSwitcher
+                visionControls
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .padding(.top, 20)
                     .padding(.leading, 16)
@@ -213,96 +215,134 @@ struct ContentView: View {
         UIPasteboard.general.string = text
     }
 
-    // MARK: - Vision orientation switcher (debug)
+    // MARK: - Vision debug controls (orientation / mapping / preview)
 
-    /// Cycles the Vision image orientation live so it can be confirmed on device
-    /// without rebuilding.
-    private var orientationSwitcher: some View {
-        Button {
-            let all = VisionImageOrientation.allCases
-            if let i = all.firstIndex(of: visionOrientation) {
-                visionOrientation = all[(i + 1) % all.count]
+    private var visionControls: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            cycleButton("Orient: \(visionOrientation.rawValue)", "rotate.3d") {
+                visionOrientation = cycle(visionOrientation, VisionImageOrientation.allCases)
             }
-        } label: {
-            Label("Orient: \(visionOrientation.rawValue)", systemImage: "rotate.3d")
-                .font(.system(.caption, design: .monospaced))
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
+            cycleButton("Map: \(mappingMode.rawValue)", "arrow.left.arrow.right") {
+                mappingMode = cycle(mappingMode, MappingMode.allCases)
+            }
+            cycleButton("Fit: \(previewMapping.rawValue)", "rectangle.dashed") {
+                previewMapping = cycle(previewMapping, PreviewMapping.allCases)
+            }
+        }
+    }
+
+    private func cycleButton(_ title: String, _ icon: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: icon)
+                .font(.system(.caption2, design: .monospaced))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
                 .background(.ultraThinMaterial, in: Capsule())
         }
         .tint(.white)
     }
 
-    // MARK: - Pupil overlay (debug)
+    private func cycle<T: Equatable>(_ value: T, _ all: [T]) -> T {
+        guard let i = all.firstIndex(of: value) else { return value }
+        return all[(i + 1) % all.count]
+    }
 
-    /// Draws the detected Vision pupil centres and the line between them, using
-    /// the SAME image coordinates that feed the PD calc. If these dots don't land
-    /// on the real pupils, the PD number isn't trustworthy.
+    // MARK: - Landmark overlay (debug)
+
+    /// Draws every layer of the Vision coordinate path so a misplacement reveals
+    /// which step is wrong. Colours:
+    ///   white  = face bounding box
+    ///   green  = left eye contour      blue   = right eye contour
+    ///   yellow = left pupil points     pink   = right pupil points
+    ///   red    = computed pupil centres + cyan line between them
     private var pupilOverlay: some View {
-        GeometryReader { geo in
-            if let v = visionDebug,
-               let ln = v.leftPupilNorm, let rn = v.rightPupilNorm,
-               let imageSize = v.imageSize {
-                let lp = aspectFillPoint(ln, imageSize, geo.size)
-                let rp = aspectFillPoint(rn, imageSize, geo.size)
-                let onPupils = (v.detectorMode == "pupil landmarks")
-                ZStack {
-                    Path { p in p.move(to: lp); p.addLine(to: rp) }
-                        .stroke(.cyan, lineWidth: 2)
-                    Circle().fill(onPupils ? .red : .orange)
-                        .frame(width: 14, height: 14).position(lp)
-                    Circle().fill(onPupils ? .red : .orange)
-                        .frame(width: 14, height: 14).position(rp)
-                }
+        Canvas { ctx, size in
+            guard let v = visionDebug, let lm = v.landmarks, let imageSize = v.imageSize else { return }
+            func m(_ n: CGPoint) -> CGPoint { mapNormalized(n, imageSize, size) }
+            func dot(_ p: CGPoint, _ r: CGFloat, _ color: Color) {
+                ctx.fill(Path(ellipseIn: CGRect(x: p.x - r, y: p.y - r, width: r * 2, height: r * 2)),
+                         with: .color(color))
+            }
+
+            // Bounding box (map all 4 corners so flips stay correct).
+            let bb = lm.boundingBox
+            let corners = [CGPoint(x: bb.minX, y: bb.minY), CGPoint(x: bb.maxX, y: bb.minY),
+                           CGPoint(x: bb.maxX, y: bb.maxY), CGPoint(x: bb.minX, y: bb.maxY)].map(m)
+            var box = Path(); box.addLines(corners + [corners[0]])
+            ctx.stroke(box, with: .color(.white), lineWidth: 2)
+
+            for p in lm.leftEyeContour  { dot(m(p), 2.5, .green) }
+            for p in lm.rightEyeContour { dot(m(p), 2.5, .blue) }
+            for p in lm.leftPupilPoints  { dot(m(p), 3, .yellow) }
+            for p in lm.rightPupilPoints { dot(m(p), 3, .pink) }
+
+            if let lc = lm.leftPupilCentre, let rc = lm.rightPupilCentre {
+                let a = m(lc), b = m(rc)
+                var line = Path(); line.move(to: a); line.addLine(to: b)
+                ctx.stroke(line, with: .color(.cyan), lineWidth: 2)
+                dot(a, 6, .red); dot(b, 6, .red)
             }
         }
         .allowsHitTesting(false)
     }
 
-    /// Maps a top-left normalised image point into view coordinates assuming the
-    /// camera preview is aspect-fill (scaled to cover, centred, overflow cropped).
-    private func aspectFillPoint(_ norm: CGPoint, _ imageSize: CGSize, _ viewSize: CGSize) -> CGPoint {
+    /// Maps a top-left normalised point into view coordinates with the current
+    /// flip mode and aspect-fill/fit, so a flip/orientation issue is obvious.
+    private func mapNormalized(_ n: CGPoint, _ imageSize: CGSize, _ viewSize: CGSize) -> CGPoint {
         guard imageSize.width > 0, imageSize.height > 0 else { return .zero }
-        let scale = max(viewSize.width / imageSize.width, viewSize.height / imageSize.height)
+        var x = n.x, y = n.y
+        switch mappingMode {
+        case .normal:  break
+        case .flipX:   x = 1 - x
+        case .flipY:   y = 1 - y
+        case .flipXY:  x = 1 - x; y = 1 - y
+        }
+        let scale: CGFloat = previewMapping == .aspectFill
+            ? max(viewSize.width / imageSize.width, viewSize.height / imageSize.height)
+            : min(viewSize.width / imageSize.width, viewSize.height / imageSize.height)
         let dispW = imageSize.width * scale
         let dispH = imageSize.height * scale
         let offX = (viewSize.width - dispW) / 2
         let offY = (viewSize.height - dispH) / 2
-        return CGPoint(x: offX + norm.x * dispW, y: offY + norm.y * dispH)
+        return CGPoint(x: offX + x * dispW, y: offY + y * dispH)
     }
 
     // MARK: - Debug readout overlay
 
     private func debugOverlay(_ r: FaceReadout) -> some View {
         let v = visionDebug
-        return VStack(alignment: .leading, spacing: 4) {
+        let lm = v?.landmarks
+        return VStack(alignment: .leading, spacing: 3) {
             Text("ARKit eye-transform PD:   \(mm(r.eyeTransformPDmm))")
             Text("Vision pupil-landmark PD: \(v?.pdMM.map(mm) ?? "n/a")")
             Text("Pixel pupil distance:     \(v?.pixelDistance.map { String(format: "%.0fpx", $0) } ?? "n/a")")
             Text("Depth used:               \(v.map { String(format: "%.2fm", $0.depthMetres) } ?? "n/a")")
             Text("fx / fy:                  \(v.map { String(format: "%.0f / %.0f", $0.fx, $0.fy) } ?? "n/a")")
-            Text("Head yaw/pitch/roll:      \(v.map { String(format: "%.0f° / %.0f° / %.0f°", $0.yaw, $0.pitch, $0.roll) } ?? "n/a")")
+            Text("Head yaw/pitch/roll:      \(v.map { String(format: "%.0f / %.0f / %.0f", $0.yaw, $0.pitch, $0.roll) } ?? "n/a")  (debug)")
             Text("Tracking state:           \(v?.trackingState ?? "n/a")")
             Text("Frame variance:           \(v.map { String(format: "%.1fmm", $0.frameVarianceMM) } ?? "n/a")")
             Text("Vision image orientation: \(v?.orientationName ?? visionOrientation.rawValue)")
-            Text("Pupil left point:         \(pt(v?.leftPupilPx))")
-            Text("Pupil right point:        \(pt(v?.rightPupilPx))")
-            Text("Vision detector mode:     \(v?.detectorMode ?? "n/a")")
+            Text("Detector mode:            \(v?.detectorMode ?? "n/a")")
             Text("Coordinate confidence:    \(v?.coordinateConfidence ?? "n/a")")
+            Text("Face bounding box:        \(rect(lm?.boundingBox))")
+            Text("L/R eye contour count:    \(lm.map { "\($0.leftEyeContour.count) / \($0.rightEyeContour.count)" } ?? "n/a")")
+            Text("L/R pupil point count:    \(lm.map { "\($0.leftPupilPoints.count) / \($0.rightPupilPoints.count)" } ?? "n/a")")
+            Text("Mapping mode:             \(mappingMode.rawValue)")
+            Text("Preview mapping:          \(previewMapping.rawValue)")
         }
-        .font(.system(.caption2, design: .monospaced))
+        .font(.system(size: 10, design: .monospaced))
         .foregroundStyle(.green)
         .padding(10)
-        .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 8))
+        .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 8))
     }
 
     private func mm(_ value: Float) -> String {
         String(format: "%.1fmm", value)
     }
 
-    private func pt(_ p: CGPoint?) -> String {
-        guard let p else { return "n/a" }
-        return String(format: "%.0f, %.0f", p.x, p.y)
+    private func rect(_ r: CGRect?) -> String {
+        guard let r else { return "n/a" }
+        return String(format: "%.2f, %.2f, %.2f, %.2f", r.origin.x, r.origin.y, r.size.width, r.size.height)
     }
 
     // MARK: - Sample callback (runs on the main thread)

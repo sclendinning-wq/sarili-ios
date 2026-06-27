@@ -329,8 +329,14 @@ struct ARFaceTrackingView: UIViewRepresentable {
             let fy = frame.camera.intrinsics.columns.1.y
 
             // Diagnostics available regardless of Vision success.
+            // Roll from the inter-eye line (reliable: ~0° for an upright face).
+            // Yaw/pitch from the face forward axis in camera space (approx).
             let faceInCamera = cameraInverse * faceAnchor.transform
-            let euler = Coordinator.eulerDegrees(faceInCamera)
+            let k = Float(180.0 / Float.pi)
+            let roll = atan2(rightEyeCam.y - leftEyeCam.y, rightEyeCam.x - leftEyeCam.x) * k
+            let fwd = faceInCamera.columns.2
+            let yaw = atan2(fwd.x, fwd.z) * k
+            let pitch = atan2(-fwd.y, sqrt(fwd.x * fwd.x + fwd.z * fwd.z)) * k
             let tracking = Coordinator.describe(frame.camera.trackingState)
             let pixelBuffer = frame.capturedImage
             let orientation = visionOrientation
@@ -353,15 +359,10 @@ struct ARFaceTrackingView: UIViewRepresentable {
                         variance = Coordinator.stdDev(self.visionHistory)
                     }
 
-                    // Normalise pupil pixels to top-left origin for the overlay.
-                    func norm(_ p: CGPoint?, _ size: CGSize?) -> CGPoint? {
-                        guard let p, let size, size.width > 0, size.height > 0 else { return nil }
-                        return CGPoint(x: p.x / size.width, y: 1 - p.y / size.height)
-                    }
-
+                    let det = result?.detection
                     let mode: String
-                    if result == nil { mode = "unavailable" }
-                    else if result?.usedFallback == true { mode = "fallback eye region" }
+                    if det == nil { mode = "unavailable" }
+                    else if det?.usedFallback == true { mode = "fallback eye region" }
                     else { mode = "pupil landmarks" }
 
                     // Confidence heuristic: real pupil landmarks, plausible PD, and
@@ -370,37 +371,33 @@ struct ARFaceTrackingView: UIViewRepresentable {
                     let confidence = (mode == "pupil landmarks" && pdOK && variance < 3)
                         ? "OK" : "needs checking"
 
+                    let landmarks = det.map {
+                        VisionLandmarks(boundingBox: $0.boundingBox,
+                                        leftEyeContour: $0.leftEyeContour,
+                                        rightEyeContour: $0.rightEyeContour,
+                                        leftPupilPoints: $0.leftPupilPoints,
+                                        rightPupilPoints: $0.rightPupilPoints,
+                                        leftPupilCentre: $0.leftPupilCentre,
+                                        rightPupilCentre: $0.rightPupilCentre)
+                    }
+
                     onVisionDebug(VisionDebugInfo(
                         pdMM: result?.pdMM,
                         pixelDistance: result?.pixelDistance,
                         depthMetres: depth,
                         fx: fx,
                         fy: fy,
-                        yaw: euler.yaw, pitch: euler.pitch, roll: euler.roll,
+                        yaw: yaw, pitch: pitch, roll: roll,
                         trackingState: tracking,
                         frameVarianceMM: variance,
                         orientationName: orientation.rawValue,
                         detectorMode: mode,
                         coordinateConfidence: confidence,
-                        leftPupilPx: result?.left,
-                        rightPupilPx: result?.right,
-                        leftPupilNorm: norm(result?.left, result?.imageSize),
-                        rightPupilNorm: norm(result?.right, result?.imageSize),
-                        imageSize: result?.imageSize
+                        imageSize: det?.imageSize,
+                        landmarks: landmarks
                     ))
                 }
             }
-        }
-
-        /// Approximate yaw/pitch/roll (degrees) from a camera-relative transform.
-        /// Convention may need sign/axis tweaks on device; debug only.
-        static func eulerDegrees(_ t: simd_float4x4) -> (yaw: Float, pitch: Float, roll: Float) {
-            let r2x = t.columns.2.x, r2y = t.columns.2.y, r2z = t.columns.2.z
-            let pitch = atan2(-r2y, sqrt(r2x * r2x + r2z * r2z))
-            let yaw = atan2(r2x, r2z)
-            let roll = atan2(t.columns.0.y, t.columns.1.y)
-            let k = Float(180.0 / Float.pi)
-            return (yaw * k, pitch * k, roll * k)
         }
 
         static func describe(_ state: ARCamera.TrackingState) -> String {
