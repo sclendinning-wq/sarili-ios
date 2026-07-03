@@ -29,6 +29,28 @@ struct ContentView: View {
     @State private var mappingMode: MappingMode = .normal
     @State private var previewMapping: PreviewMapping = .aspectFill
 
+    // Milestone 7: countdown capture — median PD over ~45 frames while the user
+    // fixates a DISTANT target (not the screen). This is the calibration
+    // experiment: median raw vs clinical ground truth fits the bias constant.
+    @State private var measurePhase: MeasurePhase = .idle
+    @State private var measureBuffer: [(raw: Float, corrected: Float)] = []
+    @State private var measureResult: MeasureResult?
+
+    enum MeasurePhase: Equatable {
+        case idle, countdown(Int), collecting, result
+    }
+
+    struct MeasureResult: Sendable {
+        let medianRaw: Float
+        let medianCorrected: Float
+        let spreadRaw: Float      // max - min across the capture
+        let frames: Int
+    }
+
+    /// Clinical reference for the calibration delta shown on the result card.
+    /// n=1 (Simon's pupilometer value) — panel-fit before trusting generally.
+    private let clinicalReferencePDMM: Float = 63.0
+
     enum ScanState {
         case requestingPermission
         case cameraDenied
@@ -67,6 +89,11 @@ struct ContentView: View {
             }
 
             statusBadge
+
+            if scanState == .ready {
+                measureUI
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            }
 
             // Entry to the separate card-reference PD flow (works without TrueDepth).
             Button { onOpenCardPD() } label: {
@@ -140,6 +167,86 @@ struct ContentView: View {
         case .requestingPermission:
             return "Requesting camera access…"
         }
+    }
+
+    // MARK: - Countdown PD measurement (milestone 7 calibration)
+
+    @ViewBuilder
+    private var measureUI: some View {
+        switch measurePhase {
+        case .idle:
+            Button { startMeasurement() } label: {
+                Label("Measure PD (look far)", systemImage: "scope")
+                    .font(.system(.subheadline, design: .monospaced))
+                    .padding(.horizontal, 16).padding(.vertical, 10)
+                    .background(.ultraThinMaterial, in: Capsule())
+            }
+            .tint(.white)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+            .padding(.bottom, 84)
+        case .countdown(let n):
+            VStack(spacing: 8) {
+                Text("Look at a DISTANT target").font(.headline)
+                Text("\(n)").font(.system(size: 64, weight: .bold, design: .monospaced))
+            }
+            .foregroundStyle(.white)
+            .padding(24)
+            .background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 14))
+        case .collecting:
+            Text("Measuring… keep looking far")
+                .font(.headline)
+                .foregroundStyle(.yellow)
+                .padding(16)
+                .background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 14))
+        case .result:
+            if let r = measureResult {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("PD capture — median of \(r.frames) frames").font(.headline)
+                    Group {
+                        Text("Median raw PD:        \(mm(r.medianRaw))")
+                        Text("Median corrected PD:  \(mm(r.medianCorrected))")
+                        Text("Spread (max−min):     \(mm(r.spreadRaw))")
+                        Text("Clinical reference:   \(mm(clinicalReferencePDMM))")
+                        Text("Raw − clinical bias:  \(String(format: "%+.1fmm", r.medianRaw - clinicalReferencePDMM))")
+                    }
+                    .font(.system(.caption, design: .monospaced))
+                    Button("Done") { measurePhase = .idle; measureResult = nil }
+                        .buttonStyle(.borderedProminent)
+                        .frame(maxWidth: .infinity)
+                }
+                .foregroundStyle(.white)
+                .padding(16)
+                .frame(maxWidth: 320)
+                .background(.black.opacity(0.8), in: RoundedRectangle(cornerRadius: 14))
+            }
+        }
+    }
+
+    private func startMeasurement() {
+        measureBuffer = []
+        measureResult = nil
+        Task { @MainActor in
+            for n in [3, 2, 1] {
+                measurePhase = .countdown(n)
+                try? await Task.sleep(for: .seconds(1))
+            }
+            measurePhase = .collecting
+        }
+    }
+
+    private func finishMeasurement() {
+        func median(_ values: [Float]) -> Float {
+            let s = values.sorted()
+            let m = s.count / 2
+            return s.count % 2 == 1 ? s[m] : (s[m - 1] + s[m]) / 2
+        }
+        let raws = measureBuffer.map(\.raw)
+        measureResult = MeasureResult(
+            medianRaw: median(raws),
+            medianCorrected: median(measureBuffer.map(\.corrected)),
+            spreadRaw: (raws.max() ?? 0) - (raws.min() ?? 0),
+            frames: measureBuffer.count)
+        measurePhase = .result
     }
 
     // MARK: - Vertex identifier toggle
@@ -426,6 +533,12 @@ struct ContentView: View {
                               correctedPDmm: correction.correctedPDmm,
                               offsetAppliedMM: correction.offsetAppliedMM,
                               eyelidPDmm: eyelidPDmm)
+
+        // --- Countdown capture (milestone 7 calibration) ---
+        if measurePhase == .collecting {
+            measureBuffer.append((raw: correction.rawPDmm, corrected: correction.correctedPDmm))
+            if measureBuffer.count >= 45 { finishMeasurement() }
+        }
     }
 
     /// Average of the given eyelid-rim vertices, transformed from face-local to
