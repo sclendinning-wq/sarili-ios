@@ -6,7 +6,14 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		6F5ED66B7083DAB0F68762B7 /* Pods_SariliScan.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A3F509212630665DEF849688 /* Pods_SariliScan.framework */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
+		A3F509212630665DEF849688 /* Pods_SariliScan.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_SariliScan.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		B8DB10626F644E67B32AADA2 /* Pods-SariliScan.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-SariliScan.release.xcconfig"; path = "Target Support Files/Pods-SariliScan/Pods-SariliScan.release.xcconfig"; sourceTree = "<group>"; };
+		D8571BE732AE57059A49788E /* Pods-SariliScan.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-SariliScan.debug.xcconfig"; path = "Target Support Files/Pods-SariliScan/Pods-SariliScan.debug.xcconfig"; sourceTree = "<group>"; };
 		F49C917C2FEB98680047B25D /* SariliScan.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SariliScan.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -23,17 +30,37 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				6F5ED66B7083DAB0F68762B7 /* Pods_SariliScan.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		0EC79145E893844B44393432 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				A3F509212630665DEF849688 /* Pods_SariliScan.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		80E9210B3B2FBBA76536E4E5 /* Pods */ = {
+			isa = PBXGroup;
+			children = (
+				D8571BE732AE57059A49788E /* Pods-SariliScan.debug.xcconfig */,
+				B8DB10626F644E67B32AADA2 /* Pods-SariliScan.release.xcconfig */,
+			);
+			path = Pods;
+			sourceTree = "<group>";
+		};
 		F49C91732FEB98680047B25D = {
 			isa = PBXGroup;
 			children = (
 				F49C917E2FEB98680047B25D /* SariliScan */,
 				F49C917D2FEB98680047B25D /* Products */,
+				80E9210B3B2FBBA76536E4E5 /* Pods */,
+				0EC79145E893844B44393432 /* Frameworks */,
 			);
 			sourceTree = "<group>";
 		};
@@ -52,6 +79,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = F49C91872FEB986A0047B25D /* Build configuration list for PBXNativeTarget "SariliScan" */;
 			buildPhases = (
+				84A58517A10072DC71BE80BF /* [CP] Check Pods Manifest.lock */,
 				F49C91782FEB98680047B25D /* Sources */,
 				F49C91792FEB98680047B25D /* Frameworks */,
 				F49C917A2FEB98680047B25D /* Resources */,
@@ -64,8 +92,6 @@
 				F49C917E2FEB98680047B25D /* SariliScan */,
 			);
 			name = SariliScan;
-			packageProductDependencies = (
-			);
 			productName = SariliScan;
 			productReference = F49C917C2FEB98680047B25D /* SariliScan.app */;
 			productType = "com.apple.product-type.application";
@@ -113,6 +139,31 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		84A58517A10072DC71BE80BF /* [CP] Check Pods Manifest.lock */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"${PODS_PODFILE_DIR_PATH}/Podfile.lock",
+				"${PODS_ROOT}/Manifest.lock",
+			);
+			name = "[CP] Check Pods Manifest.lock";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/Pods-SariliScan-checkManifestLockResult.txt",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		F49C91782FEB98680047B25D /* Sources */ = {
@@ -246,6 +297,7 @@
 		};
 		F49C91882FEB986A0047B25D /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = D8571BE732AE57059A49788E /* Pods-SariliScan.debug.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -279,6 +331,7 @@
 		};
 		F49C91892FEB986A0047B25D /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = B8DB10626F644E67B32AADA2 /* Pods-SariliScan.release.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;

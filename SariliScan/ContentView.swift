@@ -25,6 +25,7 @@ struct ContentView: View {
     @State private var detectedLeft: [Int] = []
     @State private var detectedRight: [Int] = []
     @State private var visionDebug: VisionDebugInfo?   // latest Vision diagnostics (async)
+    @State private var mediaPipeDebug: MediaPipeDebugInfo?   // latest MediaPipe iris PD (async)
     @State private var visionOrientation: VisionImageOrientation = .initial
     @State private var mappingMode: MappingMode = .normal
     @State private var previewMapping: PreviewMapping = .aspectFill
@@ -76,6 +77,7 @@ struct ContentView: View {
                                    onVertexPicked: { tappedVertex = $0 },
                                    highlightedVertices: detectedLeft + detectedRight,
                                    onVisionDebug: { visionDebug = $0 },
+                                   onMediaPipeDebug: { mediaPipeDebug = $0 },
                                    visionOrientation: visionOrientation)
                     .ignoresSafeArea()
                     .overlay { pupilOverlay }
@@ -382,6 +384,20 @@ struct ContentView: View {
     ///   APPLE  (hollow): green/blue eye contours, orange/purple pupil pts, white centres + white line
     private var pupilOverlay: some View {
         Canvas { ctx, size in
+            // MediaPipe iris centres (milestone 8): magenta — drawn even if the
+            // Vision layer has nothing, so the two detectors compare visually.
+            if let mp = mediaPipeDebug, let ln = mp.leftIrisNorm, let rn = mp.rightIrisNorm,
+               let vd = visionDebug, let mpImageSize = vd.imageSize {
+                let lp = mapNormalized(ln, mpImageSize, size)
+                let rp = mapNormalized(rn, mpImageSize, size)
+                var line = Path(); line.move(to: lp); line.addLine(to: rp)
+                ctx.stroke(line, with: .color(Color(red: 1, green: 0, blue: 1)), lineWidth: 2)
+                for p in [lp, rp] {
+                    ctx.fill(Path(ellipseIn: CGRect(x: p.x - 5, y: p.y - 5, width: 10, height: 10)),
+                             with: .color(Color(red: 1, green: 0, blue: 1)))
+                }
+            }
+
             guard let v = visionDebug, let lm = v.landmarks, let imageSize = v.imageSize else { return }
             func m(_ n: CGPoint) -> CGPoint { mapNormalized(n, imageSize, size) }
             func dot(_ p: CGPoint, _ r: CGFloat, _ color: Color) {
@@ -457,6 +473,7 @@ struct ContentView: View {
             Text("Fixate a DISTANT target for distance PD")
                 .foregroundStyle(.yellow)
             Text("Vision pupil-landmark PD: \(v?.pdMM.map(mm) ?? "n/a")")
+            Text("MediaPipe iris PD:        \(mediaPipeDebug?.pdMM.map(mm) ?? "n/a") [\(mediaPipeDebug?.status ?? "off")]")
             Text("Pixel pupil distance:     \(v?.pixelDistance.map { String(format: "%.0fpx", $0) } ?? "n/a")")
             Text("Depth used:               \(v.map { String(format: "%.2fm", $0.depthMetres) } ?? "n/a")")
             Text("fx / fy:                  \(v.map { String(format: "%.0f / %.0f", $0.fx, $0.fy) } ?? "n/a")")

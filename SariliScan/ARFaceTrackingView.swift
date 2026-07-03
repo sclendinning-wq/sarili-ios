@@ -42,6 +42,9 @@ struct ARFaceTrackingView: UIViewRepresentable {
     /// Fired on the MAIN thread with the Vision PD diagnostics for one frame.
     var onVisionDebug: ((VisionDebugInfo) -> Void)? = nil
 
+    /// Fired on the MAIN thread with the MediaPipe iris PD for one frame.
+    var onMediaPipeDebug: ((MediaPipeDebugInfo) -> Void)? = nil
+
     /// Which orientation to feed Vision. Switchable live on device.
     var visionOrientation: VisionImageOrientation = .initial
 
@@ -50,7 +53,8 @@ struct ARFaceTrackingView: UIViewRepresentable {
                     showVertexDots: showVertexDots,
                     onSampleReady: onSampleReady,
                     onVertexPicked: onVertexPicked,
-                    onVisionDebug: onVisionDebug)
+                    onVisionDebug: onVisionDebug,
+                    onMediaPipeDebug: onMediaPipeDebug)
     }
 
     func makeUIView(context: Context) -> ARSCNView {
@@ -105,6 +109,7 @@ struct ARFaceTrackingView: UIViewRepresentable {
         private let onSampleReady: ((FaceAnchorSample) -> Void)?
         private let onVertexPicked: ((Int) -> Void)?
         private let onVisionDebug: ((VisionDebugInfo) -> Void)?
+        private let onMediaPipeDebug: ((MediaPipeDebugInfo) -> Void)?
 
         // Vision PD pipeline (debug). The detector is swappable behind a protocol.
         // visionBusy / visionHistory are touched only on main (ARSession delegate
@@ -113,6 +118,10 @@ struct ARFaceTrackingView: UIViewRepresentable {
         private var visionBusy = false
         private var visionHistory: [Float] = []   // recent PDs, for frame variance
         var visionOrientation: VisionImageOrientation = .initial
+
+        // MediaPipe iris PD (milestone 8). Same one-in-flight throttle pattern.
+        private let mediaPipeEstimator = MediaPipePDEstimator()
+        private var mediaPipeBusy = false
 
         private weak var allDotsNode: SCNNode?
         private weak var eyelidDotsNode: SCNNode?
@@ -129,12 +138,14 @@ struct ARFaceTrackingView: UIViewRepresentable {
              showVertexDots: Bool,
              onSampleReady: ((FaceAnchorSample) -> Void)?,
              onVertexPicked: ((Int) -> Void)?,
-             onVisionDebug: ((VisionDebugInfo) -> Void)?) {
+             onVisionDebug: ((VisionDebugInfo) -> Void)?,
+             onMediaPipeDebug: ((MediaPipeDebugInfo) -> Void)?) {
             _faceDetected = faceDetected
             self.showVertexDots = showVertexDots
             self.onSampleReady = onSampleReady
             self.onVertexPicked = onVertexPicked
             self.onVisionDebug = onVisionDebug
+            self.onMediaPipeDebug = onMediaPipeDebug
         }
 
         // MARK: - Mesh rendering (ARSCNViewDelegate)
@@ -342,6 +353,20 @@ struct ARFaceTrackingView: UIViewRepresentable {
             let tracking = Coordinator.describe(frame.camera.trackingState)
             let pixelBuffer = frame.capturedImage
             let orientation = visionOrientation
+
+            // MediaPipe iris PD (milestone 8) — same buffer/depth/focal length,
+            // independent throttle so a slow model can't stall the Vision path.
+            if let onMediaPipeDebug, !mediaPipeBusy {
+                mediaPipeBusy = true
+                mediaPipeEstimator.estimatePD(pixelBuffer: pixelBuffer,
+                                              focalLengthPx: fx,
+                                              depthMetres: depth) { [weak self] info in
+                    DispatchQueue.main.async {
+                        self?.mediaPipeBusy = false
+                        onMediaPipeDebug(info)
+                    }
+                }
+            }
 
             visionBusy = true
             visionPipeline.process(pixelBuffer: pixelBuffer,
