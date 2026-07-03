@@ -21,7 +21,10 @@ import AVFoundation
 
 // MARK: - Camera (still capture)
 
-final class CardCameraController: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
+// Not ObservableObject: nothing here is observed by SwiftUI (no @Published),
+// and under SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor the synthesized
+// objectWillChange fails the protocol's nonisolated requirement.
+final class CardCameraController: NSObject, AVCapturePhotoCaptureDelegate {
     let session = AVCaptureSession()
     private let photoOutput = AVCapturePhotoOutput()
     private let queue = DispatchQueue(label: "com.sarili.cardpd.camera")
@@ -86,7 +89,9 @@ struct CardCameraPreview: UIViewRepresentable {
 struct CardPDView: View {
     var onClose: () -> Void = {}
 
-    @StateObject private var camera = CardCameraController()
+    // @State (not @StateObject): keeps one stable instance across renders; the
+    // view never observes the controller, it only calls into it.
+    @State private var camera = CardCameraController()
     @State private var capturedImage: UIImage?
 
     @State private var cardLeft: CGPoint?

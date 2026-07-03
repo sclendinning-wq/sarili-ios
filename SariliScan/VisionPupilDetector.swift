@@ -98,7 +98,7 @@ final class VisionPupilDetector: PupilDetector {
                                                 options: [:])
             do { try handler.perform([request]) } catch { completion(nil); return }
 
-            guard let face = (request.results as? [VNFaceObservation])?.first,
+            guard let face = request.results?.first,
                   let landmarks = face.landmarks else {
                 completion(nil)
                 return
