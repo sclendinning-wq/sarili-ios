@@ -175,15 +175,18 @@ struct ContentView: View {
     private var measureUI: some View {
         switch measurePhase {
         case .idle:
+            // Top-trailing, below the Vertices toggle, so the debug readout
+            // panel can't cover it.
             Button { startMeasurement() } label: {
                 Label("Measure PD (look far)", systemImage: "scope")
                     .font(.system(.subheadline, design: .monospaced))
                     .padding(.horizontal, 16).padding(.vertical, 10)
                     .background(.ultraThinMaterial, in: Capsule())
             }
-            .tint(.white)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-            .padding(.bottom, 84)
+            .tint(.yellow)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+            .padding(.top, 64)
+            .padding(.trailing, 16)
         case .countdown(let n):
             VStack(spacing: 8) {
                 Text("Look at a DISTANT target").font(.headline)
