@@ -16,6 +16,10 @@ struct FaceAnchorSample: Sendable {
     let leftEye: SIMD3<Float>
     /// Right eye transform translation (face-local), columns.3.
     let rightEye: SIMD3<Float>
+    /// Full eye transforms (face-local) — needed for the gaze axis used by the
+    /// pupil-plane offset correction.
+    let leftEyeTransform: simd_float4x4
+    let rightEyeTransform: simd_float4x4
     /// Face anchor origin (world), transform.columns.3.
     let faceOrigin: SIMD3<Float>
     /// Face mesh vertices in face-local space (ARFaceGeometry.vertices).

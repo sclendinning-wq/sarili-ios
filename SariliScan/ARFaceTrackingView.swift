@@ -200,6 +200,8 @@ struct ARFaceTrackingView: UIViewRepresentable {
             let sample = FaceAnchorSample(
                 leftEye: SIMD3<Float>(l.x, l.y, l.z),
                 rightEye: SIMD3<Float>(r.x, r.y, r.z),
+                leftEyeTransform: faceAnchor.leftEyeTransform,
+                rightEyeTransform: faceAnchor.rightEyeTransform,
                 faceOrigin: SIMD3<Float>(o.x, o.y, o.z),
                 vertices: Array(faceAnchor.geometry.vertices),
                 faceTransform: faceAnchor.transform,

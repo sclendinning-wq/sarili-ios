@@ -38,7 +38,9 @@ struct ContentView: View {
 
     /// ARKit-side PD values for one frame. Single frame, no averaging.
     struct FaceReadout: Sendable {
-        let eyeTransformPDmm: Float      // eye-transform PD, millimetres
+        let eyeTransformPDmm: Float      // raw rotation-centre PD, millimetres
+        let correctedPDmm: Float         // gaze-axis pupil-plane corrected PD
+        let offsetAppliedMM: Float       // the correction constant, for the readout
         let eyelidPDmm: Float?           // eyelid-centroid PD (world space); kept in code, not surfaced
     }
 
@@ -340,7 +342,10 @@ struct ContentView: View {
         let v = visionDebug
         let lm = v?.landmarks
         return VStack(alignment: .leading, spacing: 3) {
-            Text("ARKit eye-transform PD:   \(mm(r.eyeTransformPDmm))")
+            Text("ARKit eye-transform PD:   \(mm(r.eyeTransformPDmm)) (raw)")
+            Text("Corrected pupil-plane PD: \(mm(r.correctedPDmm)) (offset \(String(format: "%.0f", r.offsetAppliedMM))mm)")
+            Text("Fixate a DISTANT target for distance PD")
+                .foregroundStyle(.yellow)
             Text("Vision pupil-landmark PD: \(v?.pdMM.map(mm) ?? "n/a")")
             Text("Pixel pupil distance:     \(v?.pixelDistance.map { String(format: "%.0fpx", $0) } ?? "n/a")")
             Text("Depth used:               \(v.map { String(format: "%.2fm", $0.depthMetres) } ?? "n/a")")
@@ -394,9 +399,6 @@ struct ContentView: View {
             }
         }
 
-        // --- Eye-transform PD (existing approach, kept for comparison) ---
-        let eyeDistance = simd_distance(sample.leftEye, sample.rightEye)
-
         // --- Eyelid-centroid PD (world space) ---
         // ARFaceGeometry.vertices are in face-local space; transform to world
         // before measuring. Each eye centre is the centroid of its eyelid rim
@@ -412,8 +414,18 @@ struct ContentView: View {
             eyelidPDmm = pdMetres * 1000 + EyeLandmarks.pdCalibrationOffsetMM
         }
 
-        let eyeTransformPDmm = eyeDistance * 1000
-        readout = FaceReadout(eyeTransformPDmm: eyeTransformPDmm, eyelidPDmm: eyelidPDmm)
+        // --- Gaze-axis pupil-plane correction (milestone 7) ---
+        // Projects each eye origin forward along its gaze axis onto the pupil
+        // plane before measuring; removes the rotation-centre overread and the
+        // convergence error together. See PDCorrection.swift for the rationale.
+        let correction = PDCorrection.correctedPD(
+            leftEyeTransform: sample.leftEyeTransform,
+            rightEyeTransform: sample.rightEyeTransform)
+
+        readout = FaceReadout(eyeTransformPDmm: correction.rawPDmm,
+                              correctedPDmm: correction.correctedPDmm,
+                              offsetAppliedMM: correction.offsetAppliedMM,
+                              eyelidPDmm: eyelidPDmm)
     }
 
     /// Average of the given eyelid-rim vertices, transformed from face-local to
