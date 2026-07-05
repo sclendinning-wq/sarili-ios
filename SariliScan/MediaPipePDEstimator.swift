@@ -11,14 +11,20 @@
 //  iris centres) — it measures the actual pupils in the image. Scale comes
 //  from TrueDepth: PD_mm = pupil_pixel_distance * depth / focalLength * 1000.
 //
-//  Pixel distances are rotation/mirror invariant and fx == fy on this camera,
-//  so the orientation only needs to be right for DETECTION to succeed; it
-//  cannot bias the PD. The overlay dots remain the visual trust check.
+//  The frame is rotated/mirrored upright and converted to BGRA *before* it
+//  reaches MediaPipe, so the landmarks come back in the same upright image
+//  space they are measured and drawn in. Passing an orientation flag to
+//  MPImage instead was observed on device to return landmarks in the
+//  UNROTATED buffer's coordinate space, which stretched pixel distances by
+//  the sensor aspect ratio (PD read 4/3 too high) and misplaced the overlay
+//  dots. The overlay dots remain the visual trust check.
 //
 
 import Foundation
 import CoreVideo
 import CoreGraphics
+import CoreImage
+import ImageIO
 import UIKit
 import MediaPipeTasksVision
 
@@ -40,6 +46,27 @@ final class MediaPipePDEstimator {
     private let queue = DispatchQueue(label: "com.sarili.mediapipe.pd", qos: .userInitiated)
     private var landmarker: FaceLandmarker?
     private var initFailed = false
+    private let ciContext = CIContext(options: [.workingColorSpace: NSNull()])
+
+    /// ARKit's `capturedImage` is a YCbCr landscape buffer; MediaPipe needs
+    /// 32BGRA and (to keep every coordinate space identical) an already-upright
+    /// image. Applies the same leftMirrored orientation the Vision path uses,
+    /// then renders to a fresh BGRA buffer. A per-frame copy, but MediaPipe
+    /// already runs throttled to one in-flight frame at a time.
+    private func orientedBGRABuffer(from pixelBuffer: CVPixelBuffer) -> CVPixelBuffer? {
+        let oriented = CIImage(cvPixelBuffer: pixelBuffer).oriented(.leftMirrored)
+        let width = Int(oriented.extent.width)
+        let height = Int(oriented.extent.height)
+        let attrs: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary]
+        var bgraBuffer: CVPixelBuffer?
+        let status = CVPixelBufferCreate(kCFAllocatorDefault, width, height,
+                                          kCVPixelFormatType_32BGRA,
+                                          attrs as CFDictionary,
+                                          &bgraBuffer)
+        guard status == kCVReturnSuccess, let output = bgraBuffer else { return nil }
+        ciContext.render(oriented, to: output)
+        return output
+    }
 
     /// Lazily builds the landmarker on first use (model load is not cheap).
     private func ensureLandmarker() -> FaceLandmarker? {
@@ -80,12 +107,15 @@ final class MediaPipePDEstimator {
                 fail("model missing"); return
             }
 
-            // Front camera, portrait: same orientation Vision detects with.
-            let orientation = UIImage.Orientation.leftMirrored
+            // Pixels are made upright + mirrored here, so MediaPipe gets .up and
+            // its landmarks are guaranteed to be in this oriented image space.
+            guard let orientedBuffer = self.orientedBGRABuffer(from: pixelBuffer) else {
+                fail("pixel conversion failed"); return
+            }
 
             let result: FaceLandmarkerResult
             do {
-                let mpImage = try MPImage(pixelBuffer: pixelBuffer, orientation: orientation)
+                let mpImage = try MPImage(pixelBuffer: orientedBuffer, orientation: .up)
                 result = try landmarker.detect(image: mpImage)
             } catch {
                 fail("detect error: \(error.localizedDescription)"); return
@@ -96,13 +126,9 @@ final class MediaPipePDEstimator {
                 fail("no face"); return
             }
 
-            // Oriented image dimensions (90° rotations swap width/height).
-            let w = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
-            let h = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
-            let rotated = [UIImage.Orientation.left, .right, .leftMirrored, .rightMirrored]
-                .contains(orientation)
-            let imageW = rotated ? h : w
-            let imageH = rotated ? w : h
+            // Landmarks are normalised against the oriented buffer itself.
+            let imageW = CGFloat(CVPixelBufferGetWidth(orientedBuffer))
+            let imageH = CGFloat(CVPixelBufferGetHeight(orientedBuffer))
 
             let l = face[MediaPipePDEstimator.leftIrisCentre]
             let r = face[MediaPipePDEstimator.rightIrisCentre]

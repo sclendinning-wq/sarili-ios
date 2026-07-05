@@ -336,7 +336,22 @@ struct ARFaceTrackingView: UIViewRepresentable {
             let rightEyeWorld = faceAnchor.transform * faceAnchor.rightEyeTransform
             let leftEyeCam = cameraInverse * leftEyeWorld.columns.3
             let rightEyeCam = cameraInverse * rightEyeWorld.columns.3
-            let depth = (abs(leftEyeCam.z) + abs(rightEyeCam.z)) / 2
+            // Depth at the PUPIL plane, not the eyeball rotation centre. The
+            // eye transforms sit ~11mm behind the pupils (see PDCorrection);
+            // image-based methods (Vision, MediaPipe) measure the pupils, so
+            // using rotation-centre depth inflates px→mm by ~3% at arm's
+            // length (~+2mm on a 63mm PD). Project forward along the gaze
+            // axis with the same empirical offset PDCorrection uses.
+            func pupilLocal(_ t: simd_float4x4) -> SIMD4<Float> {
+                let origin = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
+                var gaze = simd_normalize(SIMD3<Float>(t.columns.2.x, t.columns.2.y, t.columns.2.z))
+                if gaze.z < 0 { gaze = -gaze }   // face-local +Z points out of the face
+                let p = origin + gaze * (PDCorrection.rotationCentreToPupilMM / 1000)
+                return SIMD4<Float>(p.x, p.y, p.z, 1)
+            }
+            let leftPupilCam = cameraInverse * (faceAnchor.transform * pupilLocal(faceAnchor.leftEyeTransform))
+            let rightPupilCam = cameraInverse * (faceAnchor.transform * pupilLocal(faceAnchor.rightEyeTransform))
+            let depth = (abs(leftPupilCam.z) + abs(rightPupilCam.z)) / 2
 
             let fx = frame.camera.intrinsics.columns.0.x
             let fy = frame.camera.intrinsics.columns.1.y
