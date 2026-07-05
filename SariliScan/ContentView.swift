@@ -51,6 +51,37 @@ struct ContentView: View {
     /// Clinical reference for the calibration delta shown on the result card.
     /// n=1 (Simon's pupilometer value) — panel-fit before trusting generally.
     private let clinicalReferencePDMM: Float = 63.0
+    
+    // MARK: - Positioning guidance (heuristic, not clinically validated)
+    //
+    // On-device testing (two subjects, identical 63.0mm clinical PD) showed
+    // every PD method drifting several mm high when the phone was held closer
+    // than ~30cm (TrueDepth's depth estimate gets less reliable near its
+    // minimum range) or when head yaw exceeded ~20° (off-axis geometry biases
+    // both the image-based and ARKit-transform methods). These thresholds are
+    // a starting guardrail from that one comparison, not a validated spec —
+    // revisit against a larger panel before trusting the exact numbers.
+    private let goodDistanceRangeM: ClosedRange<Float> = 0.30...0.45
+    private let maxHeadAngleDegrees: Float = 12
+
+    /// Non-nil when the current pose should be corrected before measuring;
+    /// nil means positioning looks good. Falls back to a generic instruction
+    /// before any frame has been analysed yet.
+    private var positioningGuidance: String? {
+        guard let visionDebug else {
+            return "Hold the phone at arm's length, facing the camera"
+        }
+        if visionDebug.depthMetres < goodDistanceRangeM.lowerBound {
+            return "Move the phone farther away"
+        }
+        if visionDebug.depthMetres > goodDistanceRangeM.upperBound {
+            return "Move the phone a little closer"
+        }
+        if abs(visionDebug.yaw) > maxHeadAngleDegrees || abs(visionDebug.pitch) > maxHeadAngleDegrees {
+            return "Face the camera more directly"
+        }
+        return nil
+    }
 
     enum ScanState {
         case requestingPermission
@@ -179,13 +210,29 @@ struct ContentView: View {
         case .idle:
             // Top-trailing, below the Vertices toggle, so the debug readout
             // panel can't cover it.
-            Button { startMeasurement() } label: {
-                Label("Measure PD (look far)", systemImage: "scope")
-                    .font(.system(.subheadline, design: .monospaced))
-                    .padding(.horizontal, 16).padding(.vertical, 10)
-                    .background(.ultraThinMaterial, in: Capsule())
+            VStack(spacing: 8) {
+                Text("Hold the phone at arm's length, face the camera\ndirectly, then look at something far away")
+                    .font(.system(.caption2, design: .monospaced))
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.white.opacity(0.85))
+                if let positioningGuidance {
+                    Text(positioningGuidance)
+                        .font(.system(.caption, design: .monospaced).bold())
+                        .foregroundStyle(.yellow)
+                }
+                Button { startMeasurement() } label: {
+                    Label("Measure PD (look far)", systemImage: "scope")
+                        .font(.system(.subheadline, design: .monospaced))
+                        .padding(.horizontal, 16).padding(.vertical, 10)
+                        .background(.ultraThinMaterial, in: Capsule())
+                }
+                .tint(.yellow)
+                .disabled(positioningGuidance != nil)
+                .opacity(positioningGuidance != nil ? 0.5 : 1)
             }
-            .tint(.yellow)
+            .padding(12)
+            .frame(maxWidth: 260)
+            .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 14))
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
             .padding(.top, 64)
             .padding(.trailing, 16)
@@ -193,17 +240,28 @@ struct ContentView: View {
             VStack(spacing: 8) {
                 Text("Look at a DISTANT target").font(.headline)
                 Text("\(n)").font(.system(size: 64, weight: .bold, design: .monospaced))
+                if let positioningGuidance {
+                    Text(positioningGuidance)
+                        .font(.system(.subheadline, design: .monospaced).bold())
+                        .foregroundStyle(.yellow)
+                }
             }
             .foregroundStyle(.white)
             .padding(24)
             .background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 14))
         case .collecting:
-            Text("Measuring… keep looking far")
-                .font(.headline)
-                .foregroundStyle(.yellow)
-                .padding(16)
-                .background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 14))
-        case .result:
+            VStack(spacing: 8) {
+                Text("Measuring… keep looking far")
+                    .font(.headline)
+                    .foregroundStyle(.yellow)
+                if let positioningGuidance {
+                    Text(positioningGuidance)
+                        .font(.system(.subheadline, design: .monospaced).bold())
+                        .foregroundStyle(.orange)
+                }
+            }
+            .padding(16)
+            .background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 14))        case .result:
             if let r = measureResult {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("PD capture — median of \(r.frames) frames").font(.headline)
