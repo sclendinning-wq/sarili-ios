@@ -21,8 +21,9 @@ SariliScan is an iOS app (SwiftUI + ARKit) exploring on-device pupillary distanc
 - **`ContentView`** — the ARKit face-scan flow (PD via TrueDepth face tracking, plus the milestone-9 face-dimension harness and the milestone-10 face-shape ratios).
 - **`CardPDView`** — a separate, simpler credit-card-reference PD test harness (manual taps only, no ARKit, works without TrueDepth). Math: `mm_per_pixel = 85.6 / card_pixel_width_px`, then `PD_mm = pupil_pixel_distance_px * mm_per_pixel`.
 - **`ProfileCaptureView`** — milestone 11's side-profile harness (raw TrueDepth streaming via AVFoundation, no ARKit — face tracking loses the face at profile angles).
+- **`SkinToneView`** — milestone 12's skin-tone harness (front-camera still + manual taps, white-reference card for colour normalisation).
 
-These flows share no state and should stay decoupled — don't reach across `onOpenCardPD`/`onOpenProfile`/`onClose` for anything beyond switching modes.
+These flows share no state and should stay decoupled — don't reach across `onOpenCardPD`/`onOpenProfile`/`onOpenSkinTone`/`onClose` for anything beyond switching modes.
 
 ### The face-scan pipeline (ContentView + ARFaceTrackingView)
 
@@ -54,6 +55,10 @@ Index-free like milestone 9's face width: every width is the widest mesh x-exten
 ### Profile capture (milestone 11) — `ProfileCaptureView.swift` — BUILT, UNVALIDATED
 
 Raw TrueDepth streaming (synchronized `AVCaptureVideoDataOutput` + `AVCaptureDepthDataOutput`, 4:3 preset so video/depth share a field of view), no ARKit. Capture freezes a frame; the user taps outer eye corner + top of ear junction; each tap is back-projected through the depth map and per-frame camera intrinsics to a 3D camera-space point (`ProfileMath`), reusing the `mm = px × depth / f` math milestone 8 validated. **The milestone 8 coordinate-space lesson is enforced structurally**: all math lives in raw sensor-buffer space; only the display image is rotated upright (`.leftMirrored`), and taps are mapped back by the inverse transform (a transpose) before touching depth or intrinsics. A CoreMotion tilt readout keeps the phone upright (head pitch is unknowable here — no face anchor in profile). Per-side (L/R) results persist on screen for asymmetry comparison. Unvalidated: the eye→ear distances vs a ruler, the vertical-drop sign convention, and the tap→raw transpose all need on-device confirmation.
+
+### Skin tone (milestone 12) — `SkinToneView.swift` — BUILT, UNVALIDATED
+
+Coarse skin-tone classification (lightness category + warm/cool undertone) for eyewear colour recommendations — deliberately NOT exact colour matching, which phone camera processing makes unreliable. The auto-white-balance problem is solved the milestone-6 way: a physical reference in frame (the user taps a plain WHITE card held next to the face; every skin sample is von Kries white-balanced against it). Chain per patch: averaged sRGB tap sample → linearise → white-balance → XYZ(D65) → CIELAB → ITA° (Individual Typology Angle, the standard dermatology skin-tone metric). The ITA category bands are published literature values (Chardon/Del Bino) — not fitted here — but the phone-camera pipeline feeding them is unvalidated; the undertone hue-angle split is an empirical heuristic with a flagged starting threshold. Validation = photograph people of known/agreed skin tone (or a foundation shade card) in the same light and check the categories separate correctly. The captured image is redrawn upright once at capture so display, tap, and pixel-sampling coordinates are a single space.
 
 ### Debug/calibration tooling embedded in the main UI
 
