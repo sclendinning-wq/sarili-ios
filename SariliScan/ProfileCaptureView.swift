@@ -540,10 +540,22 @@ struct ProfileCaptureView: View {
             eyeViewPoint = location
             eyeCameraPoint = camPoint
             step = .earTop
-        case .earTop, .done:
+        case .earTop:
             earViewPoint = location
             earCameraPoint = camPoint
             step = .done
+        case .done:
+            // "Retap either point to adjust": move whichever existing point
+            // is nearer the new tap, so both stay correctable after the fact.
+            if let eye = eyeViewPoint, let ear = earViewPoint,
+               hypot(eye.x - location.x, eye.y - location.y)
+                   < hypot(ear.x - location.x, ear.y - location.y) {
+                eyeViewPoint = location
+                eyeCameraPoint = camPoint
+            } else {
+                earViewPoint = location
+                earCameraPoint = camPoint
+            }
         }
         computeMeasurement(capture)
     }

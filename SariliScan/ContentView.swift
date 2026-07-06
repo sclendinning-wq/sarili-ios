@@ -300,7 +300,8 @@ struct ContentView: View {
                 }
             }
             .padding(16)
-            .background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 14))        case .result:
+            .background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 14))
+        case .result:
             if let r = measureResult {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("PD capture — median of \(r.frames) frames").font(.headline)
