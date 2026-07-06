@@ -321,6 +321,11 @@ struct ContentView: View {
                 .padding(16)
                 .frame(maxWidth: 320)
                 .background(.black.opacity(0.8), in: RoundedRectangle(cornerRadius: 14))
+                // Sit in the clear zone below the top control rows, well away
+                // from the debug readout that anchors bottom-leading — centred
+                // placement left the Done button buried under it on device.
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .padding(.top, 170)
             }
         }
     }

@@ -71,9 +71,10 @@ final class ProfileCameraController: NSObject, AVCaptureDataOutputSynchronizerDe
     private var pendingCapture = false
     private var onCaptured: ((ProfileCapture?) -> Void)?
 
-    var hasTrueDepth: Bool {
+    // Stored, not computed: the SwiftUI body reads this every render and a
+    // device-discovery query per render is wasted work.
+    let hasTrueDepth: Bool =
         AVCaptureDevice.default(.builtInTrueDepthCamera, for: .video, position: .front) != nil
-    }
 
     func configureAndStart() {
         AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
@@ -103,12 +104,19 @@ final class ProfileCameraController: NSObject, AVCaptureDataOutputSynchronizerDe
         // remember values near edges are partly synthetic.
         depthOutput.isFilteringEnabled = true
 
-        // Prefer a Float32 depth format; else take the last (usually highest
-        // resolution) and convert at capture time (handles disparity too).
+        // Highest-RESOLUTION Float32 depth format (`first` would silently pick
+        // the lowest-res one and halve measurement resolution); fall back to
+        // the highest-res format of any type and convert at capture time
+        // (the conversion handles disparity too).
         let formats = device.activeFormat.supportedDepthDataFormats
-        let depthFormat = formats.first {
+        func dims(_ f: AVCaptureDevice.Format) -> Int32 {
+            CMVideoFormatDescriptionGetDimensions(f.formatDescription).width
+        }
+        let float32Formats = formats.filter {
             CMFormatDescriptionGetMediaSubType($0.formatDescription) == kCVPixelFormatType_DepthFloat32
-        } ?? formats.last
+        }
+        let depthFormat = (float32Formats.isEmpty ? formats : float32Formats)
+            .max { dims($0) < dims($1) }
         if let depthFormat {
             try? device.lockForConfiguration()
             device.activeDepthDataFormat = depthFormat
@@ -135,10 +143,13 @@ final class ProfileCameraController: NSObject, AVCaptureDataOutputSynchronizerDe
     }
 
     /// Requests that the next synchronized video+depth pair be frozen and
-    /// handed back (on main) as a ProfileCapture.
+    /// handed back (on main) as a ProfileCapture. The completion is stored on
+    /// the camera queue so the delegate callback never races the write.
     func capture(_ completion: @escaping (ProfileCapture?) -> Void) {
-        onCaptured = completion
-        queue.async { self.pendingCapture = true }
+        queue.async {
+            self.onCaptured = completion
+            self.pendingCapture = true
+        }
     }
 
     func dataOutputSynchronizer(_ synchronizer: AVCaptureDataOutputSynchronizer,
