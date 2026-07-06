@@ -18,6 +18,7 @@ struct ContentView: View {
     @State private var readout: FaceReadout?
     @State private var showVertexDots = false
     @State private var tappedVertex: Int?
+    @State private var frozen = false   // milestone 9: freeze-frame for stable vertex taps
 
     // DEBUG-ONLY: automatic eyelid index detection state.
     @State private var detector = EyelidIndexDetector()
@@ -36,6 +37,15 @@ struct ContentView: View {
     @State private var measurePhase: MeasurePhase = .idle
     @State private var measureBuffer: [(raw: Float, corrected: Float)] = []
     @State private var measureResult: MeasureResult?
+    
+    // Milestone 9: face-dimension harness. Bridge vertex slots are assigned
+    // on-device via the tap-to-identify tool (indices are never invented in
+    // code; fixed mesh topology means a confirmed index holds for every face).
+    // Assignments persist across relaunch via UserDefaults.
+    @State private var faceDims: FaceDimensionsReadout?
+    @State private var bridgeLIndex: Int? = FaceDimensions.loadIndex("bridgeL")
+    @State private var bridgeRIndex: Int? = FaceDimensions.loadIndex("bridgeR")
+    @State private var saddleIndex: Int? = FaceDimensions.loadIndex("saddle")
 
     enum MeasurePhase: Equatable {
         case idle, countdown(Int), collecting, result
@@ -104,9 +114,11 @@ struct ContentView: View {
             case .ready:
                 ARFaceTrackingView(faceDetected: $faceDetected,
                                    showVertexDots: showVertexDots,
+                                   frozen: frozen,
                                    onSampleReady: handleSample,
                                    onVertexPicked: { tappedVertex = $0 },
-                                   highlightedVertices: detectedLeft + detectedRight,
+                                   highlightedVertices: detectedLeft + detectedRight
+                                       + [bridgeLIndex, bridgeRIndex, saddleIndex].compactMap { $0 },
                                    onVisionDebug: { visionDebug = $0 },
                                    onMediaPipeDebug: { mediaPipeDebug = $0 },
                                    visionOrientation: visionOrientation)
@@ -156,6 +168,14 @@ struct ContentView: View {
                 tapIdentifyBadge
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                     .padding(.top, 76)
+                
+                // Milestone 9: assign the tapped vertex to a bridge/saddle slot.
+                FaceDimsAssignBar(tapped: tappedVertex,
+                                  bridgeL: $bridgeLIndex,
+                                  bridgeR: $bridgeRIndex,
+                                  saddle: $saddleIndex)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .padding(.top, 120)
 
                 detectionPanel
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
@@ -315,19 +335,37 @@ struct ContentView: View {
     // MARK: - Vertex identifier toggle
 
     private var vertexToggle: some View {
-        Button {
-            showVertexDots.toggle()
-        } label: {
-            Label(showVertexDots ? "Vertices: ON" : "Vertices: OFF",
-                  systemImage: "circle.grid.3x3.fill")
-                .font(.system(.caption, design: .monospaced))
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(.ultraThinMaterial, in: Capsule())
-        }
-        .tint(showVertexDots ? .green : .white)
-    }
+        VStack(alignment: .trailing, spacing: 6) {
+            Button {
+                showVertexDots.toggle()
+                if !showVertexDots { frozen = false }   // never stay frozen with dots off
+            } label: {
+                Label(showVertexDots ? "Vertices: ON" : "Vertices: OFF",
+                      systemImage: "circle.grid.3x3.fill")
+                    .font(.system(.caption, design: .monospaced))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(.ultraThinMaterial, in: Capsule())
+            }
+            .tint(showVertexDots ? .green : .white)
 
+            // Milestone 9: freeze the frame so a vertex can be tapped without
+            // the mesh moving under the finger.
+            if showVertexDots {
+                Button {
+                    frozen.toggle()
+                } label: {
+                    Label(frozen ? "Frozen — tap dots" : "Freeze frame",
+                          systemImage: frozen ? "pause.circle.fill" : "pause.circle")
+                        .font(.system(.caption, design: .monospaced))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(.ultraThinMaterial, in: Capsule())
+                }
+                .tint(frozen ? .yellow : .white)
+            }
+        }
+    }
     /// DEBUG-ONLY: shows the index of the most recently tapped mesh vertex, so
     /// eyelid rim indices can be read off and pasted into EyeLandmarks.swift.
     private var tapIdentifyBadge: some View {
@@ -546,6 +584,12 @@ struct ContentView: View {
             Text("L/R pupil point count:    \(lm.map { "\($0.leftPupilPoints.count) / \($0.rightPupilPoints.count)" } ?? "n/a")")
             Text("Mapping mode:             \(mappingMode.rawValue)")
             Text("Preview mapping:          \(previewMapping.rawValue)")
+            Text("— Face dims (M9, unvalidated vs caliper) —")
+                .foregroundStyle(.cyan)
+            Text("Width @ eye band (±\(String(format: "%.0f", FaceDimensions.eyeBandHalfHeightMM))mm): \(faceDims.map { mm($0.faceWidthAtEyeBandMM) } ?? "n/a")  [\(faceDims?.bandVertexCount ?? 0) verts]")
+            Text("Max mesh width:           \(faceDims.map { mm($0.maxMeshWidthMM) } ?? "n/a")")
+            Text("Bridge width Δx / 3D:     \(faceDims?.bridgeWidthXMM.map(mm) ?? "n/a") / \(faceDims?.bridgeWidth3DMM.map(mm) ?? "n/a")")
+            Text("Bridge height vs pupils:  \(faceDims?.bridgeHeightMM.map { String(format: "%+.1fmm", $0) } ?? "assign saddle vertex")")
         }
         .font(.system(size: 10, design: .monospaced))
         .foregroundStyle(.green)
@@ -612,7 +656,12 @@ struct ContentView: View {
                               offsetAppliedMM: correction.offsetAppliedMM,
                               eyelidPDmm: eyelidPDmm)
 
-        // --- Countdown capture (milestone 7 calibration) ---
+        // --- Face dimensions (milestone 9 harness) ---
+        faceDims = FaceDimensions.measure(sample: sample,
+                                          bridgeL: bridgeLIndex,
+                                          bridgeR: bridgeRIndex,
+                                          saddle: saddleIndex)
+ // --- Countdown capture (milestone 7 calibration) ---
         if measurePhase == .collecting {
             measureBuffer.append((raw: correction.rawPDmm, corrected: correction.correctedPDmm))
             if measureBuffer.count >= 45 { finishMeasurement() }

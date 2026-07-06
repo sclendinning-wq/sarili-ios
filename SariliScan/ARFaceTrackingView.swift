@@ -25,6 +25,12 @@ struct ARFaceTrackingView: UIViewRepresentable {
     /// main thread — fine for a debug toggle, but remove before production
     /// measurement code rather than relying on it for anything load-bearing.
     var showVertexDots: Bool = false
+    
+    /// DEBUG-ONLY: freeze the AR session so a vertex can be tapped on a still
+    /// frame (milestone 9 slot assignment). Pausing keeps the last camera
+    /// frame and mesh on screen; taps project against the cached vertices, so
+    /// identify-and-assign keeps working while frozen.
+    var frozen: Bool = false
 
     /// Fired on the MAIN thread with a copied, Sendable per-frame sample.
     /// Consumers do all measurement here, decoupled from mesh rendering and
@@ -89,8 +95,32 @@ struct ARFaceTrackingView: UIViewRepresentable {
         context.coordinator.showVertexDots = showVertexDots
         context.coordinator.highlightedVertices = highlightedVertices
         context.coordinator.visionOrientation = visionOrientation
+        // Freeze-frame (milestone 9): pause keeps the last frame + mesh on
+        // screen for stable tapping; resume re-runs the same configuration
+        // WITHOUT reset options, so existing anchors survive and tracking
+        // picks straight back up.
+        if context.coordinator.isFrozen != frozen {
+            context.coordinator.isFrozen = frozen
+            if frozen {
+                // Order matters: project all vertices to screen space while
+                // the camera is still live, THEN pause. Tapping while frozen
+                // is served from this snapshot (projectPoint goes stale once
+                // the session pauses — observed on device).
+                context.coordinator.captureFrozenProjections()
+                uiView.session.pause()
+                // Keep the SceneKit render loop alive while the AR session is
+                // paused, so the tap marker (updated directly from handleTap)
+                // still draws on the frozen frame.
+                uiView.rendersContinuously = true
+            } else if ARFaceTrackingConfiguration.isSupported {
+                context.coordinator.clearFrozenProjections()
+                uiView.rendersContinuously = false
+                let configuration = ARFaceTrackingConfiguration()
+                configuration.maximumNumberOfTrackedFaces = 1
+                uiView.session.run(configuration)
+            }
+        }
     }
-
     static func dismantleUIView(_ uiView: ARSCNView, coordinator: Coordinator) {
         uiView.session.pause()
     }
@@ -106,6 +136,7 @@ struct ARFaceTrackingView: UIViewRepresentable {
         // DEBUG-ONLY shared mutable flags (render thread reads, main thread writes).
         var showVertexDots: Bool
         var highlightedVertices: [Int] = []
+        var isFrozen = false   // mirrors the freeze toggle; main thread only
         private let onSampleReady: ((FaceAnchorSample) -> Void)?
         private let onVertexPicked: ((Int) -> Void)?
         private let onVisionDebug: ((VisionDebugInfo) -> Void)?
@@ -271,34 +302,81 @@ struct ARFaceTrackingView: UIViewRepresentable {
 
         // MARK: - Tap to identify (debug)
 
+        /// Screen positions of every vertex, captured at the moment of freezing
+        /// (milestone 9). projectPoint returns stale results once the session
+        /// is paused (observed on device), so frozen taps are served from this
+        /// snapshot instead. x = .infinity marks vertices that were off-screen.
+        private var frozenProjections: [CGPoint] = []
+
+        func captureFrozenProjections() {
+            frozenProjections = []
+            guard let sceneView, !latestVertices.isEmpty else { return }
+            frozenProjections = latestVertices.map { vertex in
+                let world = latestFaceTransform * SIMD4<Float>(vertex.x, vertex.y, vertex.z, 1.0)
+                let projected = sceneView.projectPoint(SCNVector3(world.x, world.y, world.z))
+                guard projected.z >= 0, projected.z <= 1 else {
+                    return CGPoint(x: CGFloat.infinity, y: CGFloat.infinity)
+                }
+                return CGPoint(x: CGFloat(projected.x), y: CGFloat(projected.y))
+            }
+        }
+
+        func clearFrozenProjections() {
+            frozenProjections = []
+        }
+
         /// Projects every cached vertex to screen space and reports the index of
         /// the one nearest the tap, so eyelid rim indices can be read on device.
+        /// While frozen, matches against the freeze-time projection snapshot.
         @objc func handleTap(_ gesture: UITapGestureRecognizer) {
             guard let sceneView, !latestVertices.isEmpty else { return }
             let location = gesture.location(in: sceneView)
 
             var bestIndex: Int?
             var bestDistance = CGFloat.greatestFiniteMagnitude
-            for (index, vertex) in latestVertices.enumerated() {
-                let world = latestFaceTransform * SIMD4<Float>(vertex.x, vertex.y, vertex.z, 1.0)
-                let projected = sceneView.projectPoint(SCNVector3(world.x, world.y, world.z))
-                // Skip vertices behind the camera / outside the clip range.
-                guard projected.z >= 0, projected.z <= 1 else { continue }
-                let dx = CGFloat(projected.x) - location.x
-                let dy = CGFloat(projected.y) - location.y
-                let distance = dx * dx + dy * dy
-                if distance < bestDistance {
-                    bestDistance = distance
-                    bestIndex = index
+
+            if isFrozen, !frozenProjections.isEmpty {
+                for (index, point) in frozenProjections.enumerated() where point.x.isFinite {
+                    let dx = point.x - location.x
+                    let dy = point.y - location.y
+                    let distance = dx * dx + dy * dy
+                    if distance < bestDistance {
+                        bestDistance = distance
+                        bestIndex = index
+                    }
+                }
+            } else {
+                for (index, vertex) in latestVertices.enumerated() {
+                    let world = latestFaceTransform * SIMD4<Float>(vertex.x, vertex.y, vertex.z, 1.0)
+                    let projected = sceneView.projectPoint(SCNVector3(world.x, world.y, world.z))
+                    // Skip vertices behind the camera / outside the clip range.
+                    guard projected.z >= 0, projected.z <= 1 else { continue }
+                    let dx = CGFloat(projected.x) - location.x
+                    let dy = CGFloat(projected.y) - location.y
+                    let distance = dx * dx + dy * dy
+                    if distance < bestDistance {
+                        bestDistance = distance
+                        bestIndex = index
+                    }
                 }
             }
 
             if let bestIndex {
                 pickedVertexIndex = bestIndex
                 onVertexPicked?(bestIndex)
+
+                // While frozen, renderer(_:didUpdate:) never fires, so the
+                // yellow marker would otherwise not redraw until unfreezing.
+                // Update its geometry directly here (main thread; the render
+                // loop is kept alive via rendersContinuously while frozen).
+                if isFrozen, bestIndex < latestVertices.count {
+                    let p = latestVertices[bestIndex]
+                    markerDotNode?.geometry = Coordinator.pointCloud(
+                        [SCNVector3(p.x, p.y, p.z)], color: .systemYellow, size: 34)
+                    markerDotNode?.isHidden = false
+                }
             }
         }
-
         /// Builds an SCNGeometry that renders the given points as dots.
         static func pointCloud(_ points: [SCNVector3], color: UIColor, size: CGFloat) -> SCNGeometry {
             let source = SCNGeometrySource(vertices: points)
