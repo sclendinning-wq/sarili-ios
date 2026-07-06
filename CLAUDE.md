@@ -15,13 +15,14 @@ SariliScan is an iOS app (SwiftUI + ARKit) exploring on-device pupillary distanc
 
 ## Architecture
 
-### Two independent top-level flows, one camera session at a time
+### Independent top-level flows, one camera session at a time
 
-`SariliScanApp.swift` → `RootView` switches between exactly one of two modes, ensuring only one AVCaptureSession/ARSession is ever active:
-- **`ContentView`** — the ARKit face-scan flow (PD via TrueDepth face tracking, plus the milestone-9 face-dimension harness).
+`SariliScanApp.swift` → `RootView` switches between exactly one mode at a time, ensuring only one AVCaptureSession/ARSession is ever active:
+- **`ContentView`** — the ARKit face-scan flow (PD via TrueDepth face tracking, plus the milestone-9 face-dimension harness and the milestone-10 face-shape ratios).
 - **`CardPDView`** — a separate, simpler credit-card-reference PD test harness (manual taps only, no ARKit, works without TrueDepth). Math: `mm_per_pixel = 85.6 / card_pixel_width_px`, then `PD_mm = pupil_pixel_distance_px * mm_per_pixel`.
+- **`ProfileCaptureView`** — milestone 11's side-profile harness (raw TrueDepth streaming via AVFoundation, no ARKit — face tracking loses the face at profile angles).
 
-These two flows share no state and should stay decoupled — don't reach across `onOpenCardPD`/`onClose` for anything beyond switching modes.
+These flows share no state and should stay decoupled — don't reach across `onOpenCardPD`/`onOpenProfile`/`onClose` for anything beyond switching modes.
 
 ### The face-scan pipeline (ContentView + ARFaceTrackingView)
 
@@ -45,6 +46,14 @@ When touching PD code, preserve this "compare, don't collapse" structure — don
 ### Face dimensions (milestone 9) — `FaceDimensions.swift`
 
 Face width needs no fixed vertex indices: it's computed fresh each frame as the widest x-extent of the mesh within a horizontal band at eye height (`eyeBandHalfHeightMM`). Bridge width/height *do* need specific mesh vertices (nose bridge L/R, saddle), and the project's rule is: **never hardcode a vertex index in source.** Instead, indices are assigned on-device via the tap-to-identify UI (`FaceDimsAssignBar`) and persisted in `UserDefaults` (`FaceDimensions.loadIndex`/`saveIndex`). This works because the ARKit face mesh has a fixed topology (~1220 vertices) — an index confirmed on one face/frame holds for all faces and frames. The same rule applies to `EyeLandmarks.leftEyeRim`/`rightEyeRim`.
+
+### Face-shape ratios (milestone 10) — `FaceShapeRatios.swift` — BUILT, UNVALIDATED
+
+Index-free like milestone 9's face width: every width is the widest mesh x-extent in a horizontal band, with band positions defined as fractions of face height (chin→mesh-top), so they scale with the face. The deliverable is the **ratios** (width:length, forehead:cheek, jaw:cheek) — deliberately robust to the mesh's absolute-scale error that milestone 9 exists to quantify. The band fractions (`foreheadCentreT`, `jawCentreT`, `bandHalfT`) are empirical starting values; the readout shows band vertex counts and where the max width actually sits so they can be tuned on device. The shape label from `classify` is a coarse heuristic for eyeballing only. Validation = run on several faces whose shape category humans agree on; check the ratios separate them.
+
+### Profile capture (milestone 11) — `ProfileCaptureView.swift` — BUILT, UNVALIDATED
+
+Raw TrueDepth streaming (synchronized `AVCaptureVideoDataOutput` + `AVCaptureDepthDataOutput`, 4:3 preset so video/depth share a field of view), no ARKit. Capture freezes a frame; the user taps outer eye corner + top of ear junction; each tap is back-projected through the depth map and per-frame camera intrinsics to a 3D camera-space point (`ProfileMath`), reusing the `mm = px × depth / f` math milestone 8 validated. **The milestone 8 coordinate-space lesson is enforced structurally**: all math lives in raw sensor-buffer space; only the display image is rotated upright (`.leftMirrored`), and taps are mapped back by the inverse transform (a transpose) before touching depth or intrinsics. A CoreMotion tilt readout keeps the phone upright (head pitch is unknowable here — no face anchor in profile). Per-side (L/R) results persist on screen for asymmetry comparison. Unvalidated: the eye→ear distances vs a ruler, the vertical-drop sign convention, and the tap→raw transpose all need on-device confirmation.
 
 ### Debug/calibration tooling embedded in the main UI
 
