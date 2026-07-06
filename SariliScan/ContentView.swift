@@ -12,6 +12,7 @@ import simd
 
 struct ContentView: View {
     var onOpenCardPD: () -> Void = {}
+    var onOpenProfile: () -> Void = {}
 
     @State private var faceDetected = false
     @State private var scanState: ScanState = .requestingPermission
@@ -46,6 +47,9 @@ struct ContentView: View {
     @State private var bridgeLIndex: Int? = FaceDimensions.loadIndex("bridgeL")
     @State private var bridgeRIndex: Int? = FaceDimensions.loadIndex("bridgeR")
     @State private var saddleIndex: Int? = FaceDimensions.loadIndex("saddle")
+
+    // Milestone 10: index-free face-shape ratios (see FaceShapeRatios.swift).
+    @State private var faceShape: FaceShapeReadout?
 
     enum MeasurePhase: Equatable {
         case idle, countdown(Int), collecting, result
@@ -135,17 +139,32 @@ struct ContentView: View {
 
             statusBadge
 
-            if scanState == .ready {
+            // One instructional prompt owns the screen at a time: the PD
+            // measure UI hides while the vertex-assignment flow is active.
+            // zIndex keeps the result card (and its Done button) above the
+            // debug readout panel, which otherwise renders over it and eats
+            // its taps (seen on device).
+            if scanState == .ready, !showVertexDots {
                 measureUI
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                    .zIndex(10)
             }
 
-            // Entry to the separate card-reference PD flow (works without TrueDepth).
-            Button { onOpenCardPD() } label: {
-                Label("Card PD", systemImage: "creditcard")
-                    .font(.system(.caption, design: .monospaced))
-                    .padding(.horizontal, 12).padding(.vertical, 8)
-                    .background(.ultraThinMaterial, in: Capsule())
+            // Entries to the separate flows: card-reference PD (works without
+            // TrueDepth) and raw-TrueDepth profile capture (milestone 11).
+            VStack(alignment: .trailing, spacing: 8) {
+                Button { onOpenProfile() } label: {
+                    Label("Profile", systemImage: "person.crop.rectangle")
+                        .font(.system(.caption, design: .monospaced))
+                        .padding(.horizontal, 12).padding(.vertical, 8)
+                        .background(.ultraThinMaterial, in: Capsule())
+                }
+                Button { onOpenCardPD() } label: {
+                    Label("Card PD", systemImage: "creditcard")
+                        .font(.system(.caption, design: .monospaced))
+                        .padding(.horizontal, 12).padding(.vertical, 8)
+                        .background(.ultraThinMaterial, in: Capsule())
+                }
             }
             .tint(.white)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
@@ -590,11 +609,24 @@ struct ContentView: View {
             Text("Max mesh width:           \(faceDims.map { mm($0.maxMeshWidthMM) } ?? "n/a")")
             Text("Bridge width Δx / 3D:     \(faceDims?.bridgeWidthXMM.map(mm) ?? "n/a") / \(faceDims?.bridgeWidth3DMM.map(mm) ?? "n/a")")
             Text("Bridge height vs pupils:  \(faceDims?.bridgeHeightMM.map { String(format: "%+.1fmm", $0) } ?? "assign saddle vertex")")
+            Text("— Face shape (M10, ratios > absolutes) —")
+                .foregroundStyle(.cyan)
+            Text("Length (mesh top→chin):   \(faceShape.map { mm($0.faceLengthMM) } ?? "n/a")")
+            Text("Forehead / cheek / jaw:   \(faceShape.map { "\(mm($0.foreheadWidthMM)) / \(mm($0.cheekWidthMM)) / \(mm($0.jawWidthMM))" } ?? "n/a")")
+            Text("Cheek max-width at:       \(faceShape.map { String(format: "%.0f%% of face height", $0.cheekWidthHeightPct) } ?? "n/a")")
+            Text("W:L / F:C / J:C ratios:   \(faceShape.map { "\(ratio($0.widthToLength)) / \(ratio($0.foreheadToCheek)) / \(ratio($0.jawToCheek))" } ?? "n/a")")
+            Text("Shape guess (heuristic):  \(faceShape?.shapeGuess ?? "n/a")  [\(faceShape?.foreheadBandCount ?? 0)/\(faceShape?.jawBandCount ?? 0) band verts]")
         }
         .font(.system(size: 10, design: .monospaced))
         .foregroundStyle(.green)
         .padding(10)
         .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 8))
+        // Read-only panel: never intercept taps meant for controls beneath it.
+        .allowsHitTesting(false)
+    }
+
+    private func ratio(_ value: Float?) -> String {
+        value.map { String(format: "%.2f", $0) } ?? "n/a"
     }
 
     private func mm(_ value: Float) -> String {
@@ -661,7 +693,11 @@ struct ContentView: View {
                                           bridgeL: bridgeLIndex,
                                           bridgeR: bridgeRIndex,
                                           saddle: saddleIndex)
- // --- Countdown capture (milestone 7 calibration) ---
+
+        // --- Face-shape ratios (milestone 10 harness) ---
+        faceShape = FaceShapeRatios.measure(sample: sample)
+
+        // --- Countdown capture (milestone 7 calibration) ---
         if measurePhase == .collecting {
             measureBuffer.append((raw: correction.rawPDmm, corrected: correction.correctedPDmm))
             if measureBuffer.count >= 45 { finishMeasurement() }
