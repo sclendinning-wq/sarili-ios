@@ -170,7 +170,10 @@ final class ProfileCameraController: NSObject, AVCaptureDataOutputSynchronizerDe
         let capture = ProfileCameraController.process(sampleBuffer: videoData.sampleBuffer,
                                                       depthData: depthData.depthData,
                                                       ciContext: ciContext)
-        DispatchQueue.main.async { self.onCaptured?(capture) }
+        // Snapshot the completion HERE on the camera queue (where capture()
+        // writes it) so the main-thread hop never reads it cross-queue.
+        let completion = onCaptured
+        DispatchQueue.main.async { completion?(capture) }
     }
 
     private static func process(sampleBuffer: CMSampleBuffer,
@@ -197,7 +200,9 @@ final class ProfileCameraController: NSObject, AVCaptureDataOutputSynchronizerDe
         if let attachment = CMGetAttachment(sampleBuffer,
                                             key: kCMSampleBufferAttachmentKey_CameraIntrinsicMatrix,
                                             attachmentModeOut: nil) as? Data {
-            let m = attachment.withUnsafeBytes { $0.load(as: matrix_float3x3.self) }
+            // loadUnaligned: matrix_float3x3 wants 16-byte alignment and the
+            // CFData bytes aren't guaranteed to provide it.
+            let m = attachment.withUnsafeBytes { $0.loadUnaligned(as: matrix_float3x3.self) }
             fx = m.columns.0.x; fy = m.columns.1.y
             cx = m.columns.2.x; cy = m.columns.2.y
             source = "frame attachment"
@@ -424,10 +429,15 @@ struct ProfileCaptureView: View {
     private func markupView(_ capture: ProfileCapture) -> some View {
         GeometryReader { geo in
             ZStack {
+                // Tap gesture on the IMAGE, not the ZStack: on the stack,
+                // taps landing on the readout/controls panels fall through
+                // and register as measurement points behind the panel.
                 Image(uiImage: capture.image)
                     .resizable()
                     .scaledToFit()
                     .frame(width: geo.size.width, height: geo.size.height)
+                    .contentShape(Rectangle())
+                    .gesture(SpatialTapGesture().onEnded { handleTap($0.location, in: geo.size) })
 
                 overlayCanvas
 
@@ -438,8 +448,6 @@ struct ProfileCaptureView: View {
                 }
                 .padding(16)
             }
-            .contentShape(Rectangle())
-            .gesture(SpatialTapGesture().onEnded { handleTap($0.location, in: geo.size) })
         }
     }
 

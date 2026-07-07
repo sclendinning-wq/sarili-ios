@@ -49,8 +49,14 @@ enum SkinToneMath {
         let a: Double
         let b: Double
 
-        /// Individual Typology Angle, degrees.
-        var itaDegrees: Double { atan2(L - 50, b) * 180 / .pi }
+        /// Individual Typology Angle, degrees — the literature formula
+        /// atan((L*−50)/b*), NOT atan2: for b* ≤ 0 (only reachable with a
+        /// non-neutral "white" reference) atan2 would jump into the 90–180°
+        /// range and misread a mid tone as "very light"; plain atan stays in
+        /// (−90°, 90°) like the published metric.
+        var itaDegrees: Double {
+            b == 0 ? (L >= 50 ? 90 : -90) : atan((L - 50) / b) * 180 / .pi
+        }
 
         /// Lab hue angle, degrees (0° = +a* red axis, 90° = +b* yellow axis).
         var hueDegrees: Double { atan2(b, a) * 180 / .pi }
@@ -208,10 +214,16 @@ struct SkinToneView: View {
     private func markupView(_ image: UIImage) -> some View {
         GeometryReader { geo in
             ZStack {
+                // Tap gesture lives on the IMAGE, not the ZStack — on the
+                // stack, taps landing on the readout/controls panels fall
+                // through and get recorded as skin samples at whatever pixel
+                // sits behind the panel.
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFit()
                     .frame(width: geo.size.width, height: geo.size.height)
+                    .contentShape(Rectangle())
+                    .gesture(SpatialTapGesture().onEnded { handleTap($0.location, in: geo.size, image: image) })
 
                 overlayCanvas
 
@@ -222,8 +234,6 @@ struct SkinToneView: View {
                 }
                 .padding(16)
             }
-            .contentShape(Rectangle())
-            .gesture(SpatialTapGesture().onEnded { handleTap($0.location, in: geo.size, image: image) })
         }
     }
 
@@ -359,10 +369,12 @@ struct SkinToneView: View {
     }
 
     /// Median-by-ITA of the sampled patches (median of 3 resists one bad tap,
-    /// e.g. a shadowed jaw or a strand of hair on the forehead).
+    /// e.g. a shadowed jaw or a strand of hair on the forehead). Only defined
+    /// once ALL patches are in — "median" of a partial set silently biases
+    /// toward whichever patch happened to be tapped.
     private var medianLab: SkinToneMath.Lab? {
         let labs = skinSteps.compactMap { patches[$0]?.lab }
-        guard !labs.isEmpty else { return nil }
+        guard labs.count == skinSteps.count else { return nil }
         return labs.sorted { $0.itaDegrees < $1.itaDegrees }[labs.count / 2]
     }
 
@@ -395,7 +407,12 @@ struct SkinToneView: View {
     /// need no orientation transform (one authoritative coordinate space).
     static func normalizedUpright(_ image: UIImage) -> UIImage {
         if image.imageOrientation == .up { return image }
-        return UIGraphicsImageRenderer(size: image.size).image { _ in
+        // Explicit 1× scale: the renderer's default is the SCREEN scale (3×),
+        // which would silently allocate a 9×-pixel bitmap of a 12MP photo
+        // (hundreds of MB → jetsam risk) and interpolate the pixels sampled.
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        return UIGraphicsImageRenderer(size: image.size, format: format).image { _ in
             image.draw(in: CGRect(origin: .zero, size: image.size))
         }
     }
