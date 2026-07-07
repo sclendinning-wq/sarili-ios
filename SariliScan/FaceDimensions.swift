@@ -105,13 +105,11 @@ enum FaceDimensions {
     // their own face, so these are guide starting values, not calibration:
     /// Lateral offset of each nose pad from the face centreline.
     static let padOffsetXMM: Float = 9
-    /// Vertical offset of the pad target BELOW the eye line (negative =
-    /// above). Started at 4mm below; two on-device rounds (n=2 both times)
-    /// still read low — first "a tad lower than the pads", then "bottom of
-    /// the pad zone" — so raised in two ~3mm steps to 2mm above the eye
-    /// line, aiming for the CENTRE of the pad-contact zone (the nose flares
-    /// downward, so a low point over-reads bridge width). Still empirical.
-    static let padDropMM: Float = -2
+    /// Vertical offset of the pad target BELOW the eye line. Tuned across
+    /// three on-device rounds (n=2): 4mm read as bottom-of-pad-zone (too
+    /// low), and the chosen convention is saddle ON the pupil line with the
+    /// pads just below it — so 2mm below. Still empirical.
+    static let padDropMM: Float = 2
     /// Half-window searched around each pad target.
     static let padWindowMM: Float = 6
 
@@ -125,9 +123,10 @@ enum FaceDimensions {
     /// offset the forward-most surface is the nose flank where a pad rests.
     /// The left/right sign comes from the eye transforms, not an assumed
     /// axis convention.
-    /// Saddle: per thin y-slice along the centreline, the nose RIDGE is the
-    /// max-z vertex; the saddle is the slice whose ridge is LOWEST (the dip
-    /// a frame bridge sits in) between the eye line and ~20mm above it.
+    /// Saddle: the crest of the nose ridge AT the pupil line — the max-z
+    /// vertex on the centreline within a small y-window around the eye line.
+    /// (Earlier version hunted the lowest ridge dip up to 20mm above; the
+    /// on-device convention chosen is saddle-on-pupil-line, pads below.)
     static func suggestBridgePoints(sample: FaceAnchorSample)
         -> (bridgeL: Int, bridgeR: Int, saddle: Int)? {
         let vertices = sample.vertices
@@ -153,20 +152,13 @@ enum FaceDimensions {
         }
 
         let ridgeHalfX: Float = 4.0 / 1000
-        let yLo = eyeY - 5.0 / 1000
-        let yHi = eyeY + 20.0 / 1000
-        let sliceH: Float = 2.0 / 1000
-        var ridge: [Int: (z: Float, index: Int)] = [:]   // y-slice → forward-most vertex
+        let ridgeHalfY: Float = 3.0 / 1000   // ± window around the eye line
+        var saddle: Int?
+        var saddleZ = -Float.greatestFiniteMagnitude
         for (i, v) in vertices.enumerated()
-        where abs(v.x - midX) <= ridgeHalfX && v.y >= yLo && v.y <= yHi {
-            let slice = Int((v.y - yLo) / sliceH)
-            if let current = ridge[slice] {
-                if v.z > current.z { ridge[slice] = (v.z, i) }
-            } else {
-                ridge[slice] = (v.z, i)
-            }
+        where abs(v.x - midX) <= ridgeHalfX && abs(v.y - eyeY) <= ridgeHalfY {
+            if v.z > saddleZ { saddleZ = v.z; saddle = i }
         }
-        let saddle = ridge.values.min { $0.z < $1.z }?.index
 
         guard let l = pad(leftSign), let r = pad(-leftSign), let s = saddle else { return nil }
         return (bridgeL: l, bridgeR: r, saddle: s)
