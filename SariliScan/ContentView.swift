@@ -52,6 +52,10 @@ struct ContentView: View {
     // Milestone 10: index-free face-shape ratios (see FaceShapeRatios.swift).
     @State private var faceShape: FaceShapeReadout?
 
+    // Geometric suggestions for the bridge slots (the orange guide dots) —
+    // recomputed live so the guide tracks the face until the user freezes.
+    @State private var bridgeSuggestion: (bridgeL: Int, bridgeR: Int, saddle: Int)?
+
     enum MeasurePhase: Equatable {
         case idle, countdown(Int), collecting, result
     }
@@ -124,6 +128,7 @@ struct ContentView: View {
                                    onVertexPicked: { tappedVertex = $0 },
                                    highlightedVertices: detectedLeft + detectedRight
                                        + [bridgeLIndex, bridgeRIndex, saddleIndex].compactMap { $0 },
+                                   suggestedVertices: suggestionDots,
                                    onVisionDebug: { visionDebug = $0 },
                                    onMediaPipeDebug: { mediaPipeDebug = $0 },
                                    visionOrientation: visionOrientation)
@@ -182,6 +187,7 @@ struct ContentView: View {
                 
                 // Milestone 9: assign the tapped vertex to a bridge/saddle slot.
                 FaceDimsAssignBar(tapped: tappedVertex,
+                                  suggested: currentStepSuggestion,
                                   bridgeL: $bridgeLIndex,
                                   bridgeR: $bridgeRIndex,
                                   saddle: $saddleIndex)
@@ -392,6 +398,26 @@ struct ContentView: View {
             }
         }
     }
+    /// Suggestion for the assignment step the user is currently ON — the bar
+    /// works through the slots in order, so the first unassigned slot is the
+    /// current step. Nil once all three are assigned.
+    private var currentStepSuggestion: Int? {
+        guard let s = bridgeSuggestion else { return nil }
+        if bridgeLIndex == nil { return s.bridgeL }
+        if bridgeRIndex == nil { return s.bridgeR }
+        if saddleIndex == nil { return s.saddle }
+        return nil
+    }
+
+    /// Orange guide dots: suggestions for slots not yet assigned (assigned
+    /// slots already show teal, so suggesting them too would just overlap).
+    private var suggestionDots: [Int] {
+        guard showVertexDots, let s = bridgeSuggestion else { return [] }
+        return [bridgeLIndex == nil ? s.bridgeL : nil,
+                bridgeRIndex == nil ? s.bridgeR : nil,
+                saddleIndex == nil ? s.saddle : nil].compactMap { $0 }
+    }
+
     /// One capsule entry button per sibling harness flow — a single helper so
     /// the styling can't drift between them.
     private func harnessButton(_ title: String, _ icon: String,
@@ -718,6 +744,11 @@ struct ContentView: View {
         // shows the assignment UI instead) — the scan is ~26 full vertex
         // passes per frame, pointless when nothing shows the result.
         faceShape = showVertexDots ? nil : FaceShapeRatios.measure(sample: sample)
+
+        // --- Bridge-slot suggestions (assignment guide) ---
+        // Only needed while the assignment UI is up; the last value computed
+        // before a freeze is what the frozen frame shows.
+        bridgeSuggestion = showVertexDots ? FaceDimensions.suggestBridgePoints(sample: sample) : nil
 
         // --- Countdown capture (milestone 7 calibration) ---
         if measurePhase == .collecting {

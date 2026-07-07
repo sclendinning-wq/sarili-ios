@@ -98,6 +98,75 @@ enum FaceDimensions {
                                      bridgeHeightMM: bridgeHeightMM)
     }
 
+    // MARK: - Geometric slot suggestions (index-free guide)
+
+    // EMPIRICAL guide constants — these position the orange SUGGESTION dots
+    // only; nothing is persisted until the user visually confirms against
+    // their own face, so these are guide starting values, not calibration:
+    /// Lateral offset of each nose pad from the face centreline.
+    static let padOffsetXMM: Float = 9
+    /// Nose pads sit slightly below the pupil line.
+    static let padDropMM: Float = 4
+    /// Half-window searched around each pad target.
+    static let padWindowMM: Float = 6
+
+    /// Index-free geometric SUGGESTIONS for the three bridge slots, computed
+    /// fresh from the live mesh (no invented indices — these come out of
+    /// geometry evaluated on-device, then the user confirms visually before
+    /// anything is saved, keeping the never-hardcode-indices rule intact).
+    ///
+    /// Pads: the most FORWARD (max z) vertex in a small window ±padOffsetXMM
+    /// from the centreline, padDropMM below the eye line — at that lateral
+    /// offset the forward-most surface is the nose flank where a pad rests.
+    /// The left/right sign comes from the eye transforms, not an assumed
+    /// axis convention.
+    /// Saddle: per thin y-slice along the centreline, the nose RIDGE is the
+    /// max-z vertex; the saddle is the slice whose ridge is LOWEST (the dip
+    /// a frame bridge sits in) between the eye line and ~20mm above it.
+    static func suggestBridgePoints(sample: FaceAnchorSample)
+        -> (bridgeL: Int, bridgeR: Int, saddle: Int)? {
+        let vertices = sample.vertices
+        guard !vertices.isEmpty else { return nil }
+        let midX = (sample.leftEye.x + sample.rightEye.x) / 2
+        let eyeY = (sample.leftEye.y + sample.rightEye.y) / 2
+        let leftSign: Float = sample.leftEye.x >= midX ? 1 : -1
+
+        let padX = padOffsetXMM / 1000
+        let padY = padDropMM / 1000
+        let win = padWindowMM / 1000
+
+        func pad(_ sign: Float) -> Int? {
+            let cx = midX + sign * padX
+            let cy = eyeY - padY
+            var best: Int?
+            var bestZ = -Float.greatestFiniteMagnitude
+            for (i, v) in vertices.enumerated()
+            where abs(v.x - cx) <= win && abs(v.y - cy) <= win {
+                if v.z > bestZ { bestZ = v.z; best = i }
+            }
+            return best
+        }
+
+        let ridgeHalfX: Float = 4.0 / 1000
+        let yLo = eyeY - 5.0 / 1000
+        let yHi = eyeY + 20.0 / 1000
+        let sliceH: Float = 2.0 / 1000
+        var ridge: [Int: (z: Float, index: Int)] = [:]   // y-slice → forward-most vertex
+        for (i, v) in vertices.enumerated()
+        where abs(v.x - midX) <= ridgeHalfX && v.y >= yLo && v.y <= yHi {
+            let slice = Int((v.y - yLo) / sliceH)
+            if let current = ridge[slice] {
+                if v.z > current.z { ridge[slice] = (v.z, i) }
+            } else {
+                ridge[slice] = (v.z, i)
+            }
+        }
+        let saddle = ridge.values.min { $0.z < $1.z }?.index
+
+        guard let l = pad(leftSign), let r = pad(-leftSign), let s = saddle else { return nil }
+        return (bridgeL: l, bridgeR: r, saddle: s)
+    }
+
     // MARK: - Assigned-index persistence
     //
     // Assigned bridge indices survive relaunch so the tap-assignment only has
@@ -117,51 +186,120 @@ enum FaceDimensions {
     }
 }
 
-/// DEBUG-ONLY: slot-assignment bar shown in vertex-dots mode. Tap a mesh dot
-/// (its index appears in the badge above), then press a slot button to assign
-/// that vertex as bridge-left / bridge-right / nose saddle. Assigned vertices
-/// join the highlighted (teal) dot layer so the assignment is visually
-/// checkable on the live mesh — same trust-check pattern as the iris dots.
+/// DEBUG-ONLY: guided slot assignment shown in vertex-dots mode. One step at
+/// a time (bridge LEFT → bridge RIGHT → saddle). Each step shows an ORANGE
+/// guide dot on the mesh at the geometrically suggested spot; the user either
+/// accepts it ("Use suggested") or taps a nearby dot to fine-tune ("Use
+/// tapped"). Each step needs a FRESH tap — the previous step's tap can't be
+/// reused by accident. Assigned vertices join the teal dot layer so every
+/// assignment stays visually checkable on the live mesh.
 struct FaceDimsAssignBar: View {
     let tapped: Int?
+    /// Geometric suggestion for the CURRENT step (the orange dot).
+    let suggested: Int?
     @Binding var bridgeL: Int?
     @Binding var bridgeR: Int?
     @Binding var saddle: Int?
 
+    /// Tap consumed by the previous confirm; a step only enables "Use tapped"
+    /// once a different vertex has been tapped.
+    @State private var consumedTap: Int?
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Face dims: tap a dot, then assign it")
-                .font(.system(.caption2, design: .monospaced))
-                .foregroundStyle(.white)
-            HStack(spacing: 8) {
-                slot("Bridge L", $bridgeL, "bridgeL")
-                slot("Bridge R", $bridgeR, "bridgeR")
-                slot("Saddle", $saddle, "saddle")
-                Button("Clear") {
-                    bridgeL = nil; bridgeR = nil; saddle = nil
-                    FaceDimensions.saveIndex(nil, "bridgeL")
-                    FaceDimensions.saveIndex(nil, "bridgeR")
-                    FaceDimensions.saveIndex(nil, "saddle")
+            if let step = currentStep {
+                Text("Face dims — step \(stepNumber)/3: \(step.title)")
+                    .font(.system(.caption, design: .monospaced).bold())
+                    .foregroundStyle(.yellow)
+                Text(step.prompt)
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.white)
+                Text(suggested != nil
+                     ? "ORANGE dot = suggested spot. Accept it, or tap a dot near it to adjust."
+                     : "No suggestion this frame — tap the dot yourself (freeze helps)")
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.orange)
+                if let freshTap {
+                    Text("Tapped vertex \(freshTap)")
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(.green)
                 }
-                .tint(.red)
+                HStack(spacing: 8) {
+                    Button("Use suggested") { confirm(step, suggested) }
+                        .disabled(suggested == nil)
+                        .tint(.orange)
+                    Button("Use tapped") { confirm(step, freshTap) }
+                        .disabled(freshTap == nil)
+                        .tint(.white)
+                    Button("Start over") { clearAll() }
+                        .tint(.red)
+                }
+                .font(.caption2)
+                .controlSize(.small)
+                .buttonStyle(.bordered)
+            } else {
+                Text("Face dims: all 3 points assigned ✓ — unfreeze to see live readings")
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.green)
+                Button("Redo points") { clearAll() }
+                    .font(.caption2)
+                    .controlSize(.small)
+                    .buttonStyle(.bordered)
+                    .tint(.red)
             }
-            .font(.caption2)
-            .controlSize(.small)
-            .buttonStyle(.bordered)
-            .tint(.white)
-            .lineLimit(1)
-            .minimumScaleFactor(0.7)
         }
         .padding(10)
+        .frame(maxWidth: 300)
         .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 12))
     }
 
-    private func slot(_ name: String, _ binding: Binding<Int?>, _ key: String) -> some View {
-        Button("\(name): \(binding.wrappedValue.map(String.init) ?? "—")") {
-            guard let tapped else { return }
-            binding.wrappedValue = tapped
-            FaceDimensions.saveIndex(tapped, key)
+    private struct Step {
+        let title: String
+        let prompt: String
+        let binding: Binding<Int?>
+        let key: String
+    }
+
+    private var currentStep: Step? {
+        if bridgeL == nil {
+            return Step(title: "Bridge LEFT",
+                        prompt: "Where the LEFT nose pad would rest (left side of the nose bridge)",
+                        binding: $bridgeL, key: "bridgeL")
         }
-        .disabled(tapped == nil)
+        if bridgeR == nil {
+            return Step(title: "Bridge RIGHT",
+                        prompt: "Where the RIGHT nose pad would rest",
+                        binding: $bridgeR, key: "bridgeR")
+        }
+        if saddle == nil {
+            return Step(title: "Nose SADDLE",
+                        prompt: "The dip at the top of the nose, where a frame bridge sits",
+                        binding: $saddle, key: "saddle")
+        }
+        return nil
+    }
+
+    private var stepNumber: Int {
+        [bridgeL, bridgeR, saddle].filter { $0 != nil }.count + 1
+    }
+
+    /// A tap that hasn't already been consumed by a previous confirm.
+    private var freshTap: Int? {
+        tapped == consumedTap ? nil : tapped
+    }
+
+    private func confirm(_ step: Step, _ index: Int?) {
+        guard let index else { return }
+        step.binding.wrappedValue = index
+        FaceDimensions.saveIndex(index, step.key)
+        consumedTap = tapped
+    }
+
+    private func clearAll() {
+        bridgeL = nil; bridgeR = nil; saddle = nil
+        consumedTap = nil
+        FaceDimensions.saveIndex(nil, "bridgeL")
+        FaceDimensions.saveIndex(nil, "bridgeR")
+        FaceDimensions.saveIndex(nil, "saddle")
     }
 }

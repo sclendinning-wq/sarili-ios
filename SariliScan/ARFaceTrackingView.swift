@@ -45,6 +45,11 @@ struct ARFaceTrackingView: UIViewRepresentable {
     /// Falls back to EyeLandmarks.allEyeRim when empty.
     var highlightedVertices: [Int] = []
 
+    /// DEBUG-ONLY: geometrically SUGGESTED vertices (orange guide dots) for
+    /// the face-dims assignment flow — where the algorithm thinks the bridge
+    /// points are, before the user confirms or adjusts.
+    var suggestedVertices: [Int] = []
+
     /// Fired on the MAIN thread with the Vision PD diagnostics for one frame.
     var onVisionDebug: ((VisionDebugInfo) -> Void)? = nil
 
@@ -94,6 +99,7 @@ struct ARFaceTrackingView: UIViewRepresentable {
         // Propagate debug state into the live coordinator.
         context.coordinator.showVertexDots = showVertexDots
         context.coordinator.highlightedVertices = highlightedVertices
+        context.coordinator.suggestedVertices = suggestedVertices
         context.coordinator.visionOrientation = visionOrientation
         // Freeze-frame (milestone 9): pause keeps the last frame + mesh on
         // screen for stable tapping; resume re-runs the same configuration
@@ -136,6 +142,7 @@ struct ARFaceTrackingView: UIViewRepresentable {
         // DEBUG-ONLY shared mutable flags (render thread reads, main thread writes).
         var showVertexDots: Bool
         var highlightedVertices: [Int] = []
+        var suggestedVertices: [Int] = []
         var isFrozen = false   // mirrors the freeze toggle; main thread only
         private let onSampleReady: ((FaceAnchorSample) -> Void)?
         private let onVertexPicked: ((Int) -> Void)?
@@ -156,6 +163,7 @@ struct ARFaceTrackingView: UIViewRepresentable {
 
         private weak var allDotsNode: SCNNode?
         private weak var eyelidDotsNode: SCNNode?
+        private weak var suggestionDotsNode: SCNNode?
         private weak var markerDotNode: SCNNode?
 
         // DEBUG-ONLY tap-to-identify state. Only touched on the main thread
@@ -212,6 +220,10 @@ struct ARFaceTrackingView: UIViewRepresentable {
             node.addChildNode(eyelidDots)
             eyelidDotsNode = eyelidDots
 
+            let suggestionDots = SCNNode()
+            node.addChildNode(suggestionDots)
+            suggestionDotsNode = suggestionDots
+
             let markerDots = SCNNode()
             node.addChildNode(markerDots)
             markerDotNode = markerDots
@@ -265,6 +277,7 @@ struct ARFaceTrackingView: UIViewRepresentable {
             guard showVertexDots else {
                 allDotsNode?.isHidden = true
                 eyelidDotsNode?.isHidden = true
+                suggestionDotsNode?.isHidden = true
                 markerDotNode?.isHidden = true
                 return
             }
@@ -288,6 +301,17 @@ struct ARFaceTrackingView: UIViewRepresentable {
                 ? nil
                 : Coordinator.pointCloud(eyelidPoints, color: .systemTeal, size: 22)
             eyelidDotsNode?.isHidden = false
+
+            // Suggested vertices (face-dims guide): orange, sized between the
+            // teal highlights and the yellow tap marker so all three layers
+            // stay tellable apart at a glance.
+            let suggestionPoints = suggestedVertices
+                .filter { $0 >= 0 && $0 < vertices.count }
+                .map { SCNVector3(vertices[$0].x, vertices[$0].y, vertices[$0].z) }
+            suggestionDotsNode?.geometry = suggestionPoints.isEmpty
+                ? nil
+                : Coordinator.pointCloud(suggestionPoints, color: .systemOrange, size: 28)
+            suggestionDotsNode?.isHidden = false
 
             // Tapped vertex: a single large yellow marker for identification.
             if let idx = pickedVertexIndex, idx >= 0, idx < vertices.count {
