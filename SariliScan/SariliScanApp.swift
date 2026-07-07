@@ -21,18 +21,21 @@ struct SariliScanApp: App {
 /// raw-TrueDepth profile capture (milestone 11). Only one is in the hierarchy
 /// at a time, so only one camera session is ever active.
 struct RootView: View {
-    enum Mode { case faceScan, cardPD, profile }
+    enum Mode { case faceScan, cardPD, profile, skinTone }
     @State private var mode: Mode = .faceScan
 
     var body: some View {
         switch mode {
         case .faceScan:
             ContentView(onOpenCardPD: { mode = .cardPD },
-                        onOpenProfile: { mode = .profile })
+                        onOpenProfile: { mode = .profile },
+                        onOpenSkinTone: { mode = .skinTone })
         case .cardPD:
             CardPDView(onClose: { mode = .faceScan })
         case .profile:
             ProfileCaptureView(onClose: { mode = .faceScan })
+        case .skinTone:
+            SkinToneView(onClose: { mode = .faceScan })
         }
     }
 }

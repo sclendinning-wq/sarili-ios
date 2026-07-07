@@ -13,6 +13,7 @@ import simd
 struct ContentView: View {
     var onOpenCardPD: () -> Void = {}
     var onOpenProfile: () -> Void = {}
+    var onOpenSkinTone: () -> Void = {}
 
     @State private var faceDetected = false
     @State private var scanState: ScanState = .requestingPermission
@@ -153,18 +154,9 @@ struct ContentView: View {
             // Entries to the separate flows: card-reference PD (works without
             // TrueDepth) and raw-TrueDepth profile capture (milestone 11).
             VStack(alignment: .trailing, spacing: 8) {
-                Button { onOpenProfile() } label: {
-                    Label("Profile", systemImage: "person.crop.rectangle")
-                        .font(.system(.caption, design: .monospaced))
-                        .padding(.horizontal, 12).padding(.vertical, 8)
-                        .background(.ultraThinMaterial, in: Capsule())
-                }
-                Button { onOpenCardPD() } label: {
-                    Label("Card PD", systemImage: "creditcard")
-                        .font(.system(.caption, design: .monospaced))
-                        .padding(.horizontal, 12).padding(.vertical, 8)
-                        .background(.ultraThinMaterial, in: Capsule())
-                }
+                harnessButton("Skin tone", "paintpalette", onOpenSkinTone)
+                harnessButton("Profile", "person.crop.rectangle", onOpenProfile)
+                harnessButton("Card PD", "creditcard", onOpenCardPD)
             }
             .tint(.white)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
@@ -363,7 +355,16 @@ struct ContentView: View {
         VStack(alignment: .trailing, spacing: 6) {
             Button {
                 showVertexDots.toggle()
-                if !showVertexDots { frozen = false }   // never stay frozen with dots off
+                if showVertexDots {
+                    // Entering assignment mode hides the measure UI, so cancel
+                    // any in-flight/finished PD capture — otherwise it lingers
+                    // invisibly (collecting silently, or holding a stale
+                    // result card that reappears later).
+                    measurePhase = .idle
+                    measureResult = nil
+                } else {
+                    frozen = false   // never stay frozen with dots off
+                }
             } label: {
                 Label(showVertexDots ? "Vertices: ON" : "Vertices: OFF",
                       systemImage: "circle.grid.3x3.fill")
@@ -391,6 +392,18 @@ struct ContentView: View {
             }
         }
     }
+    /// One capsule entry button per sibling harness flow — a single helper so
+    /// the styling can't drift between them.
+    private func harnessButton(_ title: String, _ icon: String,
+                               _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: icon)
+                .font(.system(.caption, design: .monospaced))
+                .padding(.horizontal, 12).padding(.vertical, 8)
+                .background(.ultraThinMaterial, in: Capsule())
+        }
+    }
+
     /// DEBUG-ONLY: shows the index of the most recently tapped mesh vertex, so
     /// eyelid rim indices can be read off and pasted into EyeLandmarks.swift.
     private var tapIdentifyBadge: some View {
@@ -701,7 +714,10 @@ struct ContentView: View {
                                           saddle: saddleIndex)
 
         // --- Face-shape ratios (milestone 10 harness) ---
-        faceShape = FaceShapeRatios.measure(sample: sample)
+        // Only while the readout that displays it is visible (vertex mode
+        // shows the assignment UI instead) — the scan is ~26 full vertex
+        // passes per frame, pointless when nothing shows the result.
+        faceShape = showVertexDots ? nil : FaceShapeRatios.measure(sample: sample)
 
         // --- Countdown capture (milestone 7 calibration) ---
         if measurePhase == .collecting {

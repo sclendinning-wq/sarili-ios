@@ -41,7 +41,11 @@ import simd
 
 /// One frozen, synchronized video+depth frame plus the intrinsics needed to
 /// back-project taps. Everything is in RAW sensor-buffer space except `image`.
-struct ProfileCapture {
+/// @unchecked: CVPixelBuffer isn't Sendable, but this is an immutable snapshot
+/// — the depth map is written once at capture and only ever read afterwards —
+/// matching the project rule that per-frame data crosses threads as a value
+/// snapshot (camera queue → main), never as a live reference.
+struct ProfileCapture: @unchecked Sendable {
     let image: UIImage          // upright display image (transposed raw buffer)
     let videoWidth: Int         // raw video buffer dims (landscape sensor space)
     let videoHeight: Int
@@ -302,8 +306,17 @@ struct ProfileCaptureView: View {
         let horizontalMM: Float    // screen-horizontal component
         let depthEyeM: Float
         let depthEarM: Float
-        let intrinsicsSource: String
     }
+
+    /// Max phone tilt (degrees from portrait-upright) treated as acceptable.
+    /// EMPIRICAL starting value — how much tilt visibly corrupts the vertical
+    /// drop is one of the things on-device validation must establish.
+    private let maxTiltDegrees: Double = 5
+
+    /// A retap only adjusts a finished measurement when it lands within this
+    /// distance of an existing marker — a stray touch far from both must not
+    /// silently move a point and corrupt the result. EMPIRICAL UI radius.
+    private let maxAdjustDistancePt: CGFloat = 80
 
     @State private var camera = ProfileCameraController()
     @State private var capture: ProfileCapture?
@@ -397,7 +410,7 @@ struct ProfileCaptureView: View {
 
     private var tiltBadge: some View {
         let tilt = tiltDegrees
-        let ok = (tilt ?? 99) <= 5
+        let ok = (tilt ?? 99) <= maxTiltDegrees
         return Text(tilt.map { String(format: "Phone tilt: %.0f°%@", $0, ok ? " ✓" : "  — hold upright") }
                     ?? "Phone tilt: n/a")
             .font(.system(.caption, design: .monospaced).bold())
@@ -535,6 +548,13 @@ struct ProfileCaptureView: View {
         let iy = (location.y - offY) / scale
         guard ix >= 0, iy >= 0, ix < imgW, iy < imgH else { return }
 
+        // Distinguish "no intrinsics on this capture" (retap won't help; the
+        // whole capture lacks mm scale) from "no depth at that pixel" (retap
+        // nearby) — cameraPoint fails for both and the messages must differ.
+        guard capture.fx > 0 else {
+            status = "No camera intrinsics in this capture — Retake"
+            return
+        }
         // Display image is the transposed raw buffer (.leftMirrored: 0th raw
         // row → display left, 0th raw column → display top), so the inverse
         // mapping is a plain transpose: raw x = display y, raw y = display x.
@@ -544,7 +564,7 @@ struct ProfileCaptureView: View {
             status = "No depth at that point — tap again"
             return
         }
-        status = capture.fx > 0 ? nil : "No intrinsics — mm values unavailable"
+        status = nil
 
         switch step {
         case .eyeCorner:
@@ -556,11 +576,17 @@ struct ProfileCaptureView: View {
             earCameraPoint = camPoint
             step = .done
         case .done:
-            // "Retap either point to adjust": move whichever existing point
-            // is nearer the new tap, so both stay correctable after the fact.
-            if let eye = eyeViewPoint, let ear = earViewPoint,
-               hypot(eye.x - location.x, eye.y - location.y)
-                   < hypot(ear.x - location.x, ear.y - location.y) {
+            // "Retap either point to adjust": move whichever existing marker
+            // is nearer — but only when the tap lands close to one, so a
+            // stray touch can't silently move a point and corrupt the result.
+            guard let eye = eyeViewPoint, let ear = earViewPoint else { return }
+            let dEye = hypot(eye.x - location.x, eye.y - location.y)
+            let dEar = hypot(ear.x - location.x, ear.y - location.y)
+            guard min(dEye, dEar) <= maxAdjustDistancePt else {
+                status = "Tap ignored — tap ON a marker to adjust it"
+                return
+            }
+            if dEye < dEar {
                 eyeViewPoint = location
                 eyeCameraPoint = camPoint
             } else {
@@ -582,8 +608,7 @@ struct ProfileCaptureView: View {
                                     dropMM: d.x * 1000,
                                     horizontalMM: abs(d.y) * 1000,
                                     depthEyeM: a.z,
-                                    depthEarM: b.z,
-                                    intrinsicsSource: capture.intrinsicsSource)
+                                    depthEarM: b.z)
     }
 
     private func resetTaps() {
