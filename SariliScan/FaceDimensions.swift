@@ -105,10 +105,13 @@ enum FaceDimensions {
     // their own face, so these are guide starting values, not calibration:
     /// Lateral offset of each nose pad from the face centreline.
     static let padOffsetXMM: Float = 9
-    /// Nose pads sit roughly at the pupil line. Started at 4mm below; on
-    /// device (n=2, both subjects) that landed the suggestion visibly lower
-    /// than where their pads actually rest, so raised ~3mm. Still empirical.
-    static let padDropMM: Float = 1
+    /// Vertical offset of the pad target BELOW the eye line (negative =
+    /// above). Started at 4mm below; two on-device rounds (n=2 both times)
+    /// still read low — first "a tad lower than the pads", then "bottom of
+    /// the pad zone" — so raised in two ~3mm steps to 2mm above the eye
+    /// line, aiming for the CENTRE of the pad-contact zone (the nose flares
+    /// downward, so a low point over-reads bridge width). Still empirical.
+    static let padDropMM: Float = -2
     /// Half-window searched around each pad target.
     static let padWindowMM: Float = 6
 
