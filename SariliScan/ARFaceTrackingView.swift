@@ -101,6 +101,11 @@ struct ARFaceTrackingView: UIViewRepresentable {
         context.coordinator.highlightedVertices = highlightedVertices
         context.coordinator.suggestedVertices = suggestedVertices
         context.coordinator.visionOrientation = visionOrientation
+        // While frozen the render callback that normally redraws the dot
+        // layers never fires, so confirming an assignment would give no
+        // visual feedback (no new teal dot, stale orange dot) until
+        // unfreeze. Rebuild the layers here from the cached vertices.
+        context.coordinator.refreshDotLayersWhileFrozen()
         // Freeze-frame (milestone 9): pause keeps the last frame + mesh on
         // screen for stable tapping; resume re-runs the same configuration
         // WITHOUT reset options, so existing anchors survive and tracking
@@ -347,6 +352,33 @@ struct ARFaceTrackingView: UIViewRepresentable {
 
         func clearFrozenProjections() {
             frozenProjections = []
+        }
+
+        /// Rebuilds the teal (assigned/highlighted) and orange (suggested)
+        /// dot layers from the cached vertices. Only needed while frozen —
+        /// live tracking redraws them every frame via renderer(_:didUpdate:),
+        /// which does not fire while the session is paused. The render loop
+        /// itself stays alive during freeze via rendersContinuously.
+        func refreshDotLayersWhileFrozen() {
+            guard isFrozen, showVertexDots, !latestVertices.isEmpty else { return }
+            let vertices = latestVertices
+
+            let highlightSource = highlightedVertices.isEmpty ? EyeLandmarks.allEyeRim : highlightedVertices
+            let eyelidPoints = highlightSource
+                .filter { $0 >= 0 && $0 < vertices.count }
+                .map { SCNVector3(vertices[$0].x, vertices[$0].y, vertices[$0].z) }
+            eyelidDotsNode?.geometry = eyelidPoints.isEmpty
+                ? nil
+                : Coordinator.pointCloud(eyelidPoints, color: .systemTeal, size: 22)
+            eyelidDotsNode?.isHidden = false
+
+            let suggestionPoints = suggestedVertices
+                .filter { $0 >= 0 && $0 < vertices.count }
+                .map { SCNVector3(vertices[$0].x, vertices[$0].y, vertices[$0].z) }
+            suggestionDotsNode?.geometry = suggestionPoints.isEmpty
+                ? nil
+                : Coordinator.pointCloud(suggestionPoints, color: .systemOrange, size: 28)
+            suggestionDotsNode?.isHidden = false
         }
 
         /// Projects every cached vertex to screen space and reports the index of

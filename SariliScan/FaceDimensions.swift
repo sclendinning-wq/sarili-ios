@@ -139,14 +139,23 @@ enum FaceDimensions {
         let padY = padDropMM / 1000
         let win = padWindowMM / 1000
 
+        // Nearest vertex to the target point. (An earlier version took the
+        // most FORWARD vertex in the window, but z rises toward the nose
+        // ridge, so that biased both pads toward the centreline and made the
+        // suggested pads sit too close together.) The x-window is kept
+        // narrower than the y-window so it can't reach the ridge zone.
+        let xWin: Float = 3.0 / 1000
         func pad(_ sign: Float) -> Int? {
             let cx = midX + sign * padX
             let cy = eyeY - padY
             var best: Int?
-            var bestZ = -Float.greatestFiniteMagnitude
-            for (i, v) in vertices.enumerated()
-            where abs(v.x - cx) <= win && abs(v.y - cy) <= win {
-                if v.z > bestZ { bestZ = v.z; best = i }
+            var bestD = Float.greatestFiniteMagnitude
+            for (i, v) in vertices.enumerated() {
+                let dx = v.x - cx
+                let dy = v.y - cy
+                guard abs(dx) <= xWin, abs(dy) <= win else { continue }
+                let d = dx * dx + dy * dy
+                if d < bestD { bestD = d; best = i }
             }
             return best
         }
@@ -235,7 +244,7 @@ struct FaceDimsAssignBar: View {
                 .controlSize(.small)
                 .buttonStyle(.bordered)
             } else {
-                Text("Face dims: all 3 points assigned ✓ — unfreeze to see live readings")
+                Text("Face dims: all 3 points assigned ✓ — live readings running")
                     .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(.green)
                 Button("Redo points") { clearAll() }
@@ -294,7 +303,9 @@ struct FaceDimsAssignBar: View {
 
     private func clearAll() {
         bridgeL = nil; bridgeR = nil; saddle = nil
-        consumedTap = nil
+        // Consume the current tap too — after a reset, step 1 should demand a
+        // genuinely fresh tap, not inherit whatever was tapped last.
+        consumedTap = tapped
         FaceDimensions.saveIndex(nil, "bridgeL")
         FaceDimensions.saveIndex(nil, "bridgeR")
         FaceDimensions.saveIndex(nil, "saddle")

@@ -32,6 +32,7 @@ struct ContentView: View {
     @State private var visionOrientation: VisionImageOrientation = .initial
     @State private var mappingMode: MappingMode = .normal
     @State private var previewMapping: PreviewMapping = .aspectFill
+    @State private var showDevControls = false   // Orient/Map/Fit hidden by default
 
     // Milestone 7: countdown capture — median PD over ~45 frames while the user
     // fixates a DISTANT target (not the screen). This is the calibration
@@ -168,23 +169,25 @@ struct ContentView: View {
             .padding(.bottom, 24)
             .padding(.trailing, 16)
 
+            // Control columns start BELOW the status pill (top ~24–56pt) so
+            // the pill is never buried under them (seen on device).
             if scanState == .ready {
                 vertexToggle
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                    .padding(.top, 20)
+                    .padding(.top, 64)
                     .padding(.trailing, 16)
 
                 visionControls
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    .padding(.top, 20)
+                    .padding(.top, 64)
                     .padding(.leading, 16)
             }
 
             if scanState == .ready, showVertexDots {
                 tapIdentifyBadge
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                    .padding(.top, 76)
-                
+                    .padding(.top, 112)
+
                 // Milestone 9: assign the tapped vertex to a bridge/saddle slot.
                 FaceDimsAssignBar(tapped: tappedVertex,
                                   suggested: currentStepSuggestion,
@@ -192,7 +195,7 @@ struct ContentView: View {
                                   bridgeR: $bridgeRIndex,
                                   saddle: $saddleIndex)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                    .padding(.top, 120)
+                    .padding(.top, 156)
 
                 detectionPanel
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
@@ -209,6 +212,11 @@ struct ContentView: View {
         .onChange(of: faceDetected) { _, isDetected in
             // Clear the live readout the moment the face is lost.
             if !isDetected { readout = nil }
+        }
+        .onChange(of: [bridgeLIndex, bridgeRIndex, saddleIndex].compactMap { $0 }.count) { _, assigned in
+            // Confirming the third point auto-unfreezes so the live readings
+            // start immediately — no "now unfreeze" step to remember.
+            if assigned == 3 { frozen = false }
         }
     }
 
@@ -271,7 +279,7 @@ struct ContentView: View {
             .frame(maxWidth: 260)
             .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 14))
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-            .padding(.top, 64)
+            .padding(.top, 108)
             .padding(.trailing, 16)
         case .countdown(let n):
             VStack(spacing: 8) {
@@ -323,7 +331,7 @@ struct ContentView: View {
                 // from the debug readout that anchors bottom-leading — centred
                 // placement left the Done button buried under it on device.
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                .padding(.top, 170)
+                .padding(.top, 204)
             }
         }
     }
@@ -505,16 +513,25 @@ struct ContentView: View {
 
     // MARK: - Vision debug controls (orientation / mapping / preview)
 
+    /// DEBUG-ONLY: the orientation/mapping cycling controls were milestone
+    /// 5/8 diagnostics and are rarely needed now that those coordinate paths
+    /// are validated — collapsed behind a "Dev" toggle so the everyday flow
+    /// isn't cluttered with three cryptic buttons.
     private var visionControls: some View {
         VStack(alignment: .leading, spacing: 6) {
-            cycleButton("Orient: \(visionOrientation.rawValue)", "rotate.3d") {
-                visionOrientation = cycle(visionOrientation, VisionImageOrientation.allCases)
+            cycleButton(showDevControls ? "Dev ▾" : "Dev ▸", "wrench.and.screwdriver") {
+                showDevControls.toggle()
             }
-            cycleButton("Map: \(mappingMode.rawValue)", "arrow.left.arrow.right") {
-                mappingMode = cycle(mappingMode, MappingMode.allCases)
-            }
-            cycleButton("Fit: \(previewMapping.rawValue)", "rectangle.dashed") {
-                previewMapping = cycle(previewMapping, PreviewMapping.allCases)
+            if showDevControls {
+                cycleButton("Orient: \(visionOrientation.rawValue)", "rotate.3d") {
+                    visionOrientation = cycle(visionOrientation, VisionImageOrientation.allCases)
+                }
+                cycleButton("Map: \(mappingMode.rawValue)", "arrow.left.arrow.right") {
+                    mappingMode = cycle(mappingMode, MappingMode.allCases)
+                }
+                cycleButton("Fit: \(previewMapping.rawValue)", "rectangle.dashed") {
+                    previewMapping = cycle(previewMapping, PreviewMapping.allCases)
+                }
             }
         }
     }
