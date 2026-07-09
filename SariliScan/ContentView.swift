@@ -119,7 +119,7 @@ struct ContentView: View {
     }
 
     var body: some View {
-        ZStack(alignment: .top) {
+        ZStack {
             switch scanState {
             case .ready:
                 ARFaceTrackingView(faceDetected: $faceDetected,
@@ -144,21 +144,65 @@ struct ContentView: View {
                     .ignoresSafeArea()
             }
 
-            statusBadge
+            if scanState == .ready {
+                // TOP LANE — status pill, control columns, then whichever
+                // instruction card is active, stacked top-down. One stack
+                // means the cards CANNOT bury one another, and every future
+                // instrument just joins the lane — this replaced a family of
+                // hand-tuned absolute offsets that collided on device.
+                VStack(spacing: 10) {
+                    statusBadge
+                    HStack(alignment: .top) {
+                        visionControls
+                        Spacer()
+                        vertexToggle
+                    }
+                    if showVertexDots {
+                        tapIdentifyBadge
+                        // Milestone 9: assign tapped vertices to bridge slots.
+                        FaceDimsAssignBar(tapped: tappedVertex,
+                                          suggested: currentStepSuggestion,
+                                          bridgeL: $bridgeLIndex,
+                                          bridgeR: $bridgeRIndex,
+                                          saddle: $saddleIndex)
+                    } else {
+                        measureTopCard
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.top, 8)
+                .padding(.horizontal, 16)
 
-            // One instructional prompt owns the screen at a time: the PD
-            // measure UI hides while the vertex-assignment flow is active.
-            // zIndex keeps the result card (and its Done button) above the
-            // debug readout panel, which otherwise renders over it and eats
-            // its taps (seen on device).
-            if scanState == .ready, !showVertexDots {
-                measureUI
+                // BOTTOM LANE — diagnostics panel anchored bottom-leading,
+                // harness entry buttons bottom-trailing. The panels are
+                // display-only (never hit-testable), so the buttons stay
+                // tappable even where they visually overlap on small screens.
+                if showVertexDots {
+                    detectionPanel
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                        .padding(12)
+                } else if let readout {
+                    debugOverlay(readout)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                        .padding(16)
+                }
+
+                // CENTRE — the transient countdown/collecting card only; it
+                // owns the screen for a few seconds and overlaps nothing
+                // interactive.
+                measureCentreCard
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                    .zIndex(10)
+            } else {
+                VStack {
+                    statusBadge
+                    Spacer()
+                }
+                .padding(.top, 24)
+                .padding(.horizontal, 16)
             }
 
-            // Entries to the separate flows: card-reference PD (works without
-            // TrueDepth) and raw-TrueDepth profile capture (milestone 11).
+            // Entries to the separate flows (Card PD works without TrueDepth,
+            // so these stay reachable in every scan state).
             VStack(alignment: .trailing, spacing: 8) {
                 harnessButton("Skin tone", "paintpalette", onOpenSkinTone)
                 harnessButton("Profile", "person.crop.rectangle", onOpenProfile)
@@ -168,43 +212,6 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
             .padding(.bottom, 24)
             .padding(.trailing, 16)
-
-            // Control columns start BELOW the status pill (top ~24–56pt) so
-            // the pill is never buried under them (seen on device).
-            if scanState == .ready {
-                vertexToggle
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                    .padding(.top, 64)
-                    .padding(.trailing, 16)
-
-                visionControls
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    .padding(.top, 64)
-                    .padding(.leading, 16)
-            }
-
-            if scanState == .ready, showVertexDots {
-                tapIdentifyBadge
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                    .padding(.top, 112)
-
-                // Milestone 9: assign the tapped vertex to a bridge/saddle slot.
-                FaceDimsAssignBar(tapped: tappedVertex,
-                                  suggested: currentStepSuggestion,
-                                  bridgeL: $bridgeLIndex,
-                                  bridgeR: $bridgeRIndex,
-                                  saddle: $saddleIndex)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                    .padding(.top, 156)
-
-                detectionPanel
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                    .padding(12)
-            } else if scanState == .ready, let readout {
-                debugOverlay(readout)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
-                    .padding(16)
-            }
         }
         .task {
             await startSession()
@@ -222,6 +229,7 @@ struct ContentView: View {
 
     // MARK: - Status overlay
 
+    // Plain pill — the lane it sits in provides the outer spacing.
     private var statusBadge: some View {
         Text(statusText)
             .font(.headline)
@@ -230,8 +238,6 @@ struct ContentView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
             .background(.ultraThinMaterial, in: Capsule())
-            .padding(.top, 24)
-            .padding(.horizontal, 24)
     }
 
     private var statusText: String {
@@ -249,38 +255,68 @@ struct ContentView: View {
 
     // MARK: - Countdown PD measurement (milestone 7 calibration)
 
+    /// Idle prompt + result card, shown IN the top lane (so they can never
+    /// collide with the status pill, control rows, or bottom readout).
     @ViewBuilder
-    private var measureUI: some View {
+    private var measureTopCard: some View {
         switch measurePhase {
         case .idle:
-            // Top-trailing, below the Vertices toggle, so the debug readout
-            // panel can't cover it.
-            VStack(spacing: 8) {
-                Text("Hold the phone at arm's length, face the camera\ndirectly, then look at something far away")
-                    .font(.system(.caption2, design: .monospaced))
-                    .multilineTextAlignment(.center)
-                    .foregroundStyle(.white.opacity(0.85))
-                if let positioningGuidance {
-                    Text(positioningGuidance)
-                        .font(.system(.caption, design: .monospaced).bold())
-                        .foregroundStyle(.yellow)
+            HStack {
+                Spacer()
+                VStack(spacing: 8) {
+                    Text("Hold the phone at arm's length, face the camera\ndirectly, then look at something far away")
+                        .font(.system(.caption2, design: .monospaced))
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.white.opacity(0.85))
+                    if let positioningGuidance {
+                        Text(positioningGuidance)
+                            .font(.system(.caption, design: .monospaced).bold())
+                            .foregroundStyle(.yellow)
+                    }
+                    Button { startMeasurement() } label: {
+                        Label("Measure PD (look far)", systemImage: "scope")
+                            .font(.system(.subheadline, design: .monospaced))
+                            .padding(.horizontal, 16).padding(.vertical, 10)
+                            .background(.ultraThinMaterial, in: Capsule())
+                    }
+                    .tint(.yellow)
+                    .disabled(positioningGuidance != nil)
+                    .opacity(positioningGuidance != nil ? 0.5 : 1)
                 }
-                Button { startMeasurement() } label: {
-                    Label("Measure PD (look far)", systemImage: "scope")
-                        .font(.system(.subheadline, design: .monospaced))
-                        .padding(.horizontal, 16).padding(.vertical, 10)
-                        .background(.ultraThinMaterial, in: Capsule())
-                }
-                .tint(.yellow)
-                .disabled(positioningGuidance != nil)
-                .opacity(positioningGuidance != nil ? 0.5 : 1)
+                .padding(12)
+                .frame(maxWidth: 260)
+                .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 14))
             }
-            .padding(12)
-            .frame(maxWidth: 260)
-            .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 14))
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-            .padding(.top, 108)
-            .padding(.trailing, 16)
+        case .result:
+            if let r = measureResult {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("PD capture — median of \(r.frames) frames").font(.headline)
+                    Group {
+                        Text("Median raw PD:        \(mm(r.medianRaw))")
+                        Text("Median corrected PD:  \(mm(r.medianCorrected))")
+                        Text("Spread (max−min):     \(mm(r.spreadRaw))")
+                        Text("Clinical reference:   \(mm(clinicalReferencePDMM))")
+                        Text("Raw − clinical bias:  \(String(format: "%+.1fmm", r.medianRaw - clinicalReferencePDMM))")
+                    }
+                    .font(.system(.caption, design: .monospaced))
+                    Button("Done") { measurePhase = .idle; measureResult = nil }
+                        .buttonStyle(.borderedProminent)
+                        .frame(maxWidth: .infinity)
+                }
+                .foregroundStyle(.white)
+                .padding(16)
+                .frame(maxWidth: 320)
+                .background(.black.opacity(0.8), in: RoundedRectangle(cornerRadius: 14))
+            }
+        case .countdown, .collecting:
+            EmptyView()   // transient phases render centred, not in the lane
+        }
+    }
+
+    /// Transient countdown/collecting card, centred on screen.
+    @ViewBuilder
+    private var measureCentreCard: some View {
+        switch measurePhase {
         case .countdown(let n):
             VStack(spacing: 8) {
                 Text("Look at a DISTANT target").font(.headline)
@@ -307,32 +343,8 @@ struct ContentView: View {
             }
             .padding(16)
             .background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 14))
-        case .result:
-            if let r = measureResult {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("PD capture — median of \(r.frames) frames").font(.headline)
-                    Group {
-                        Text("Median raw PD:        \(mm(r.medianRaw))")
-                        Text("Median corrected PD:  \(mm(r.medianCorrected))")
-                        Text("Spread (max−min):     \(mm(r.spreadRaw))")
-                        Text("Clinical reference:   \(mm(clinicalReferencePDMM))")
-                        Text("Raw − clinical bias:  \(String(format: "%+.1fmm", r.medianRaw - clinicalReferencePDMM))")
-                    }
-                    .font(.system(.caption, design: .monospaced))
-                    Button("Done") { measurePhase = .idle; measureResult = nil }
-                        .buttonStyle(.borderedProminent)
-                        .frame(maxWidth: .infinity)
-                }
-                .foregroundStyle(.white)
-                .padding(16)
-                .frame(maxWidth: 320)
-                .background(.black.opacity(0.8), in: RoundedRectangle(cornerRadius: 14))
-                // Sit in the clear zone below the top control rows, well away
-                // from the debug readout that anchors bottom-leading — centred
-                // placement left the Done button buried under it on device.
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                .padding(.top, 204)
-            }
+        case .idle, .result:
+            EmptyView()
         }
     }
 
